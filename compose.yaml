@@ -1,0 +1,124 @@
+name: "${COMPOSE_PROJECT_NAME:-commons-devloop}"
+
+x-engine-service: &engine-service
+  image: "${AE_ENGINE_IMAGE:-commons-devloop:local}"
+  working_dir: /engine
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    AE_MODE: "${AE_MODE:-loop}"
+    AE_REPO_CONFIG: "${AE_REPO_CONFIG:-/engine/config/repos/${AE_REPO_CONFIG_FILE:-template.yaml}}"
+    AE_STATE_DIR: "${AE_STATE_DIR:-/engine/state}"
+    AE_STACK_ID: "${AE_STACK_ID:-}"
+    AE_WORKSPACE_DIR: "${AE_WORKSPACE_DIR:-/workspace/target-repo}"
+    AE_DEFAULT_LOG_LEVEL: "${AE_DEFAULT_LOG_LEVEL:-info}"
+    GH_TOKEN: "${GH_TOKEN:-}"
+    GITHUB_APP_ID: "${GITHUB_APP_ID:-}"
+    GITHUB_APP_INSTALLATION_ID: "${GITHUB_APP_INSTALLATION_ID:-}"
+    GITHUB_APP_PRIVATE_KEY_PATH: "${GITHUB_APP_PRIVATE_KEY_PATH:-}"
+    AE_LOOP_INTERVAL_SECONDS: "${AE_LOOP_INTERVAL_SECONDS:-300}"
+    CODEX_HOME: "/engine/.codex"
+    GH_CONFIG_DIR: "/root/.config/gh"
+  volumes:
+    - .:/engine
+    - engine-node-modules:/engine/node_modules
+    - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
+    - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
+    - codex-home:/engine/.codex
+    - gh-config:/root/.config/gh
+
+services:
+  engine-image:
+    image: "${AE_ENGINE_IMAGE:-commons-devloop:local}"
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args:
+        AE_IMAGE_VERSION: "${AE_IMAGE_VERSION:-local}"
+        AE_IMAGE_COMMIT_SHA: "${AE_IMAGE_COMMIT_SHA:-unknown}"
+        AE_IMAGE_CREATED: "${AE_IMAGE_CREATED:-1970-01-01T00:00:00Z}"
+        AE_IMAGE_EDITION: "${AE_IMAGE_EDITION:-local}"
+    profiles: ["build"]
+
+  # Repo-focused branches start the full standard local-service stack by default.
+  # Disable roles only through committed repo config opt-outs.
+  autonomous:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "autonomous"]
+
+  dispatcher:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "dispatcher"]
+
+  validator:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "validator"]
+
+  reviewer:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "reviewer"]
+
+  runner-manager:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "runner-manager"]
+    volumes:
+      - .:/engine
+      - engine-node-modules:/engine/node_modules
+      - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
+      - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
+      - codex-home:/engine/.codex
+      - gh-config:/root/.config/gh
+      # Runner-manager needs write access for container launch/cleanup and registration workflows.
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+
+  pr-manager:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "pr-manager"]
+
+  monitor:
+    <<: *engine-service
+    command: ["node", "scripts/engine-role.mjs", "--role", "monitor"]
+
+  dashboard:
+    <<: *engine-service
+    command: ["node", "scripts/dashboard-server.mjs"]
+    volumes:
+      - .:/engine
+      - engine-node-modules:/engine/node_modules
+      # Keeps the image-built frontend (services/Dockerfile's dashboard-build
+      # stage) available despite the whole-repo bind mount above, the same
+      # way engine-node-modules survives it.
+      - dashboard-dist:/engine/dashboard/dist
+      - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
+      - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
+      - codex-home:/engine/.codex
+      - gh-config:/root/.config/gh
+      # Dashboard reads container status and host CPU/disk metrics; mount docker socket read-only.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "${AE_DASHBOARD_PORT:-4700}:${AE_DASHBOARD_PORT:-4700}"
+
+  local-model:
+    image: "${AE_LOCAL_MODEL_IMAGE:-ollama/ollama:latest}"
+    profiles: ["local-lane"]
+    restart: unless-stopped
+    volumes:
+      - ${AE_LOCAL_MODEL_CACHE_PATH:-local-model-cache}:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "${AE_LOCAL_MODEL_KEEP_ALIVE:-5m}"
+      OLLAMA_LOAD_TIMEOUT: "${AE_LOCAL_MODEL_LOAD_TIMEOUT:-30m}"
+      OLLAMA_DEBUG: "${AE_LOCAL_MODEL_DEBUG:-}"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  engine-node-modules:
+  dashboard-dist:
+  codex-home:
+  gh-config:
+  local-model-cache:

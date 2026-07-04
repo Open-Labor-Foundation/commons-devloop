@@ -1,0 +1,8 @@
+node_modules/
+state/
+logs/
+.codex/
+.env
+.env.remote
+.DS_Store
+dashboard/dist/

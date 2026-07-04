@@ -1,0 +1,25 @@
+{
+  "name": "commons-devloop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable autonomous GitHub repo engine with role-based containers.",
+  "scripts": {
+    "role": "node scripts/engine-role.mjs",
+    "control": "node scripts/control.mjs",
+    "service:control": "node scripts/service-control.mjs",
+    "dashboard": "node scripts/dashboard-server.mjs",
+    "validate:config": "node scripts/validate-config.mjs",
+    "check:local-lane": "node scripts/check-local-lane.mjs",
+    "predeploy:check": "node scripts/predeploy-check.mjs",
+    "deploy:host": "bash scripts/deploy-branch-to-host.sh",
+    "smoke:local-service": "node scripts/local-service-acceptance-harness.mjs",
+    "smoke:local-service:branch-deploy": "node scripts/local-service-acceptance-harness.mjs --branch-deployment",
+    "predeploy:matrix": "node scripts/predeploy-matrix.mjs",
+    "test:deploy-host": "bash scripts/test-deploy-branch-to-host.sh",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

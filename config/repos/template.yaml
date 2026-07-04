@@ -1,0 +1,158 @@
+version: 2
+
+repo:
+  key: target-repo-key
+  github_slug: owner/target-repo
+  default_branch: main
+
+lifecycle:
+  enabled: true
+  target_mode: milestone
+  target_name: v1
+  pause_when_target_complete: true
+  pause_when_budget_exhausted: true
+  max_parallel_prs: 2
+  max_runs_per_day: 12
+
+issue_source:
+  labels:
+    - codex-ready
+
+# Repo-focused branches start the full standard local-service stack by default:
+# autonomous, dispatcher, validator, reviewer, runner-manager, pr-manager, monitor, dashboard.
+# Commit `enabled: false` or `roles.enabled.<role>: false` only for explicit opt-outs.
+dispatcher:
+  poll_interval_seconds: 30
+  primary_max_workers: 1
+  secondary_max_workers: 1
+  local_max_workers: 0
+
+models:
+  dispatcher:
+    # Arbitrary-length lane list — add, remove, or mix providers freely.
+    # Inference is your choice: OpenAI's Codex CLI (hosted_codex), a
+    # self-hosted local container (local_container — Ollama/LM Studio), or
+    # any OpenAI-compatible hosted API (openai_compatible — Featherless.ai
+    # is the documented, cost-efficient default for this org, but any
+    # OpenAI-compatible endpoint works the same way).
+    lanes:
+      - key: primary
+        label: Primary lane
+        provider: hosted_codex
+        name: gpt-5.3-codex-spark
+        reasoning_effort: high
+        max_workers: 1
+        pause_threshold_used_percent: 90
+        weekly_pause_threshold_used_percent: 90
+        reserve_burn_window_minutes: 300
+        nominal_burn_per_lane_hour: 3
+      - key: secondary
+        label: Secondary lane
+        provider: hosted_codex
+        name: gpt-5.4
+        reasoning_effort: medium
+        max_workers: 1
+        pause_threshold_used_percent: 70
+        weekly_pause_threshold_used_percent: 70
+        reserve_burn_window_minutes: 300
+        nominal_burn_per_lane_hour: 3
+      # Example: a Featherless.ai lane (openai_compatible). Disabled by
+      # default — set enabled: true and either set FEATHERLESS_API_KEY in
+      # your environment or enter the key through the dashboard settings
+      # UI once running (a UI-entered key always takes priority).
+      - key: featherless
+        label: Featherless lane
+        provider: openai_compatible
+        enabled: false
+        name: Qwen/Qwen3-32B
+        reasoning_effort: medium
+        max_workers: 0
+        runtime_endpoint: https://api.featherless.ai/v1
+        api_key_env: FEATHERLESS_API_KEY
+      # Example: a local container lane (Ollama). Disabled by default —
+      # the engine manages this container's lifecycle itself.
+      - key: local
+        label: Local lane
+        provider: local_container
+        enabled: false
+        name: qwen2.5-coder:7b
+        reasoning_effort: local
+        max_workers: 0
+        runtime_service: local-model
+        runtime_endpoint: http://local-model:11434/v1
+        runtime_health_url: http://local-model:11434/api/tags
+        runtime_image: ollama/ollama:latest
+        local_provider: ollama
+        auto_pull: false
+  reviewer:
+    name: gpt-5.4
+    reasoning_effort: medium
+
+validation:
+  context: validate
+  poll_interval_seconds: 30
+  max_concurrent: 1
+  commands:
+    - npm test
+  post_status: false
+
+reviewer:
+  poll_interval_seconds: 120
+  max_concurrent: 1
+  post_mode: comment
+
+runner_manager:
+  required_labels:
+    - self-hosted
+    - linux
+    - target-repo-key
+  runner_labels:
+    - self-hosted
+    - linux
+    - target-repo-key
+  image_name: commons-devloop/gh-runner:latest
+  container_prefix: target-repo-key-gh-runner
+  max_runners: 2
+  poll_interval_seconds: 20
+  launch_cooldown_seconds: 180
+  mount_docker_socket: true
+  mount_workspace: false
+  dry_run: true
+
+pr_manager:
+  interval_seconds: 30
+  merge_concurrency: 2
+  update_branch_concurrency: 2
+  auto_merge_label: autonomous-automerge
+  auto_close_superseded_conflicts: false
+
+monitor:
+  poll_interval_seconds: 30
+
+safety:
+  pr_only: true
+  auto_merge: false
+  protected_branches:
+    - main
+  protected_paths: []
+  allow_force_push: false
+  require_clean_worktree_before_run: true
+
+budgets:
+  max_estimated_credits_per_day: 100
+  pause_reason_on_budget: daily credit budget reached
+
+branches:
+  work_branch_prefix: autonomous/
+  pr_base_branch: main
+
+dashboard:
+  port: 4700
+  expose_issue_details: true
+  expose_pr_links: true
+
+retention:
+  enabled: true
+  worktree_max_age_hours: 6
+  run_log_max_age_days: 2
+  output_max_age_days: 2

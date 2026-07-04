@@ -1,0 +1,158 @@
+version: 2
+
+required:
+  - repo
+  - lifecycle
+  - issue_source
+  - validation
+  - safety
+  - models
+
+repo:
+  key: "string; stable local identifier"
+  github_slug: "string; owner/repo"
+  default_branch: "string"
+  workspace_dir: "optional string; defaults to /workspace/target-repo"
+
+lifecycle:
+  enabled: "boolean"
+  target_mode: "milestone | label | backlog_file"
+  target_name: "string; milestone name, label, or backlog file path"
+  pause_when_target_complete: "boolean"
+  pause_when_budget_exhausted: "boolean"
+  max_parallel_prs: "integer >= 1"
+  max_runs_per_day: "integer >= 1"
+
+issue_source:
+  labels: "optional list of strings; all listed labels must exist on a target issue"
+  required_issue_prefix: "optional string"
+  allow_manual_issue_numbers: "optional list of integers"
+
+dispatcher:
+  enabled: "optional boolean; omit for the default-on dispatcher role, set false only for a repo-specific opt-out"
+  poll_interval_seconds: "optional integer >= 5"
+  primary_max_workers: "optional integer >= 0"
+  secondary_max_workers: "optional integer >= 0"
+  local_max_workers: "optional integer >= 0"
+  skip_issue_numbers: "optional list of integers"
+
+models:
+  dispatcher:
+    lanes:
+      - key: "stable lane key, for example primary, secondary, or local"
+        label: "operator-facing lane label"
+        provider: "hosted_codex | local_container | openai_compatible"
+        enabled: "optional boolean"
+        name: "model name (Codex model, Ollama/LM Studio model, or the model id your OpenAI-compatible provider expects)"
+        reasoning_effort: "operator-selected reasoning effort label"
+        max_workers: "optional integer >= 0"
+        runtime_service: "optional; local_container only — compose service name the engine manages"
+        runtime_endpoint: "required for local_container and openai_compatible — the OpenAI-compatible base URL to call (e.g. a local Ollama/LM Studio container, or a hosted endpoint like https://api.featherless.ai/v1)"
+        runtime_health_url: "optional; local_container only — health-check URL for the managed container"
+        runtime_image: "optional; local_container only — container image the engine manages"
+        runtime_command: "optional command override for local_container lanes"
+        local_provider: "optional; local_container only — local serving software: ollama | lmstudio"
+        num_thread: "optional integer; local_container/ollama only — num_thread request option, 0 or omitted lets Ollama choose"
+        num_ctx: "optional integer; local_container/ollama only — num_ctx request option, 0 or omitted uses runner default"
+        auto_pull: "optional boolean; local_container/ollama only — when true local runner may pull a missing Ollama model"
+        api_key_env: "optional string; openai_compatible only — env var name to resolve this lane's API key from. A key entered via the dashboard settings UI takes priority over this when both are present; see docs/config-reference.md."
+    primary:
+      name: "model name for the primary lane"
+      reasoning_effort: "operator-selected reasoning effort label"
+      pause_threshold_used_percent: "pause threshold for used percentage"
+      weekly_pause_threshold_used_percent: "weekly pause threshold for used percentage"
+      reserve_burn_window_minutes: "minutes over which reserve can burn down"
+      nominal_burn_per_lane_hour: "expected credits burned per lane-hour"
+    local:
+      enabled: "optional boolean"
+      name: "local model name"
+      reasoning_effort: "operator-selected local reasoning label"
+      max_workers: "optional integer >= 0"
+      runtime_service: "optional local runtime compose service name"
+      runtime_endpoint: "optional local runtime OpenAI-compatible endpoint"
+      runtime_health_url: "optional local runtime health URL"
+      runtime_image: "optional local runtime container image"
+      runtime_command: "optional command override for local_container lanes"
+      local_provider: "optional local provider: ollama | lmstudio"
+      num_thread: "optional integer; Ollama num_thread request option, 0 or omitted lets Ollama choose"
+      num_ctx: "optional integer; Ollama num_ctx request option, 0 or omitted uses runner default"
+      auto_pull: "optional boolean; when true local runner may pull a missing Ollama model"
+    secondary:
+      name: "model name for the secondary lane"
+      reasoning_effort: "operator-selected reasoning effort label"
+      pause_threshold_used_percent: "pause threshold for used percentage"
+      weekly_pause_threshold_used_percent: "weekly pause threshold for used percentage"
+      reserve_burn_window_minutes: "minutes over which reserve can burn down"
+      nominal_burn_per_lane_hour: "expected credits burned per lane-hour"
+  reviewer:
+    name: "model name for codex review"
+    reasoning_effort: "operator-selected reasoning effort label"
+
+validation:
+  enabled: "optional boolean; omit for the default-on validator role, set false only for a repo-specific opt-out"
+  context: "optional string; commit status context"
+  commands: "list of shell commands run in worktree order"
+  working_directory: "optional string; relative to worktree"
+  poll_interval_seconds: "optional integer >= 5"
+  max_concurrent: "optional integer >= 1"
+  post_status: "optional boolean"
+
+reviewer:
+  enabled: "optional boolean; omit for the default-on reviewer role, set false only for a repo-specific opt-out"
+  poll_interval_seconds: "optional integer >= 15"
+  max_concurrent: "optional integer >= 1"
+  post_mode: "none | comment | review"
+  instructions_path: "optional absolute path to review instructions"
+
+runner_manager:
+  enabled: "optional boolean; omit for the default-on runner-manager role, set false only for a repo-specific opt-out"
+  scope: "optional string; repo or org"
+  required_labels: "optional list of strings"
+  runner_labels: "optional list of strings"
+  runner_group: "optional string"
+  image_name: "optional string"
+  container_prefix: "optional string"
+  max_runners: "optional integer >= 1"
+  poll_interval_seconds: "optional integer >= 5"
+  launch_cooldown_seconds: "optional integer >= 10"
+  network: "optional string"
+  mount_docker_socket: "optional boolean"
+  mount_workspace: "optional boolean"
+  dry_run: "optional boolean"
+
+pr_manager:
+  enabled: "optional boolean; omit for the default-on pr-manager role, set false only for a repo-specific opt-out"
+  interval_seconds: "optional integer >= 5"
+  merge_concurrency: "optional integer >= 1"
+  update_branch_concurrency: "optional integer >= 1; defaults to max(merge_concurrency, lifecycle.max_parallel_prs)"
+  auto_merge_label: "optional string"
+  auto_close_superseded_conflicts: "optional boolean; when true, close autonomous DIRTY PRs whose linked issue is already closed"
+
+monitor:
+  enabled: "optional boolean; omit for the default-on monitor role, set false only for a repo-specific opt-out"
+  poll_interval_seconds: "optional integer >= 5"
+
+safety:
+  pr_only: "boolean"
+  auto_merge: "boolean"
+  protected_branches: "list of strings"
+  protected_paths: "list of glob-like strings"
+  allow_force_push: "boolean"
+  require_clean_worktree_before_run: "boolean"
+
+budgets:
+  max_estimated_credits_per_day: "optional number"
+  pause_reason_on_budget: "optional string"
+
+branches:
+  work_branch_prefix: "optional string; default autonomous/"
+  pr_base_branch: "optional string; defaults to repo.default_branch"
+
+roles:
+  enabled: "optional map of standard role name to boolean; omit the map to accept the default-on stack for repo-focused branches, and set autonomous, dispatcher, validator, reviewer, runner-manager, pr-manager, monitor, or dashboard to false only for explicit repo opt-outs"
+
+dashboard:
+  enabled: "optional boolean; omit for the default-on dashboard role, set false only for a repo-specific opt-out"
+  port: "optional integer"
+  expose_issue_details: "optional boolean"
+  expose_pr_links: "optional boolean"

@@ -1,0 +1,31 @@
+name: Bug Report
+about: Report a bug or unexpected behavior
+title: '[Bug] '
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behavior.
+      placeholder: What did you expect to happen, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "OS, Docker version, Node version, relevant config"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell

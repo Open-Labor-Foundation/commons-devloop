@@ -1,0 +1,8 @@
+.git
+.env
+.codex
+node_modules
+state
+logs
+.DS_Store
+dashboard/dist

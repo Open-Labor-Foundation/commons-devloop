@@ -1,0 +1,30 @@
+name: Feature Request
+about: Propose a new feature or improvement
+title: '[Feature] '
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or need
+      description: What gap or limitation does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should change and how?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why you ruled them out.
+  - type: textarea
+    id: nongoals
+    attributes:
+      label: Non-goals
+      description: What this proposal explicitly does not include.

@@ -1,0 +1,9 @@
+version: 1
+
+profiles:
+  - name: qa
+    phase: qa
+    repo_config_file: autonomous-engine.yaml
+    stack_id: autonomous-engine-qa
+    dashboard_port: 4700
+    target_repo_path: .

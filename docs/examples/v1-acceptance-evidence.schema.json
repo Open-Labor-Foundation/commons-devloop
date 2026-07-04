@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autonomous Engine v1 Acceptance Evidence",
+  "type": "object",
+  "required": [
+    "releaseVersion",
+    "releaseDate",
+    "acceptedBy",
+    "checklist",
+    "decision",
+    "evidence"
+  ],
+  "properties": {
+    "releaseVersion": {
+      "type": "string"
+    },
+    "releaseDate": {
+      "type": "string",
+      "format": "date"
+    },
+    "acceptedBy": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["approved", "blocked", "blocked_with_exceptions"]
+    },
+    "decisionNotes": {
+      "type": "string"
+    },
+    "checklist": {
+      "type": "object",
+      "required": ["source", "sections", "generatedAt"],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "install",
+              "license_status",
+              "config_validation",
+              "stack_health",
+              "issue_to_merge_smoke",
+              "reset_recovery",
+              "support_bundle",
+              "upgrade_rollback",
+              "release_manifest",
+              "manual_hardware"
+            ]
+          },
+        "minItems": 9,
+        "maxItems": 10,
+        "uniqueItems": true
+      },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type", "status", "command", "collectedAt", "artifact"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["automated", "manual"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "pending", "not_applicable"]
+          },
+          "command": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "artifact": {
+            "type": "string"
+          },
+          "collectedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operator": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

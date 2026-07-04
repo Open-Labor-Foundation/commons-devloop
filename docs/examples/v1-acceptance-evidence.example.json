@@ -1,0 +1,82 @@
+{
+  "releaseVersion": "1.0.0",
+  "releaseDate": "2026-01-01",
+  "acceptedBy": "release-operator",
+  "decision": "approved",
+  "decisionNotes": "",
+  "checklist": {
+    "source": "docs/v1-acceptance.md",
+    "sections": [
+      "install",
+      "license_status",
+      "config_validation",
+      "stack_health",
+      "issue_to_merge_smoke",
+      "reset_recovery",
+      "support_bundle",
+      "upgrade_rollback",
+      "release_manifest",
+      "manual_hardware"
+    ],
+    "generatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  "evidence": [
+    {
+      "id": "install-01",
+      "name": "Compose stack starts",
+      "type": "automated",
+      "status": "pass",
+      "command": "docker compose up -d autonomous dispatcher validator reviewer runner-manager pr-manager monitor dashboard",
+      "artifact": "compose-start.log",
+      "collectedAt": "2026-01-01T00:01:00.000Z",
+      "notes": "All expected services reached running state."
+    },
+    {
+      "id": "license-01",
+      "name": "License read from dashboard",
+      "type": "automated",
+      "status": "pass",
+      "command": "curl -fsS \"http://localhost:4700/health\"",
+      "artifact": "license.json",
+      "collectedAt": "2026-01-01T00:02:00.000Z",
+      "operator": "release-operator"
+    },
+    {
+      "id": "smoke-01",
+      "name": "Local-only smoke (one issue)",
+      "type": "automated",
+      "status": "pass",
+      "command": "npm run smoke:local-service -- --json > dist/releases/1.0.0/local-service-smoke.json",
+      "artifact": "dist/releases/1.0.0/local-service-smoke.json",
+      "collectedAt": "2026-01-01T00:05:00.000Z"
+    },
+    {
+      "id": "support-bundle-01",
+      "name": "Support bundle generated",
+      "type": "automated",
+      "status": "pass",
+      "command": "tar --ignore-failed-read -czf dist/releases/1.0.0/support-bundle-olf-agents.yaml-1.0.0.tar.gz state/repos/<repo-key>/run-logs",
+      "artifact": "dist/releases/1.0.0/support-bundle-olf-agents.yaml-1.0.0.tar.gz",
+      "collectedAt": "2026-01-01T00:06:00.000Z"
+    },
+    {
+      "id": "manifest-01",
+      "name": "Release manifest generated",
+      "type": "automated",
+      "status": "pass",
+      "command": "node scripts/release-manifest.mjs --version 1.0.0 --image-tag <registry>/<customer>/autonomous-engine:1.0.0 --config-template config/repos/template.yaml --docs-bundle docs/operator-guide.md --build-source manual --out dist/releases/1.0.0/release-manifest.json",
+      "artifact": "dist/releases/1.0.0/release-manifest.json",
+      "collectedAt": "2026-01-01T00:07:00.000Z"
+    },
+    {
+      "id": "hardware-01",
+      "name": "Local lane hardware validation",
+      "type": "manual",
+      "status": "pass",
+      "command": "AE_REPO_CONFIG=config/repos/olf-agents.yaml npm run check:local-lane",
+      "artifact": "run-logs/local-lane-check.log",
+      "collectedAt": "2026-01-01T00:08:00.000Z",
+      "operator": "release-operator"
+    }
+  ]
+}

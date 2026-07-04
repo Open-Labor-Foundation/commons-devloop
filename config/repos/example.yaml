@@ -1,0 +1,140 @@
+version: 2
+
+repo:
+  key: target-repo-key
+  github_slug: owner/target-repo
+  default_branch: main
+
+lifecycle:
+  enabled: true
+  target_mode: open
+  target_name: all-open-issues
+  pause_when_target_complete: true
+  pause_when_budget_exhausted: true
+  max_parallel_prs: 1
+  max_runs_per_day: 16
+
+issue_source:
+  labels: []
+  required_issue_prefix:
+
+dispatcher:
+  enabled: true
+  poll_interval_seconds: 5
+  primary_max_workers: 1
+  secondary_max_workers: 1
+  local_max_workers: 0
+
+models:
+  dispatcher:
+    primary:
+      name: gpt-5.3-codex-spark
+      reasoning_effort: high
+      pause_threshold_used_percent: 90
+      weekly_pause_threshold_used_percent: 90
+      reserve_burn_window_minutes: 300
+      nominal_burn_per_lane_hour: 3
+    secondary:
+      name: gpt-5.4
+      reasoning_effort: medium
+      pause_threshold_used_percent: 70
+      weekly_pause_threshold_used_percent: 70
+      reserve_burn_window_minutes: 300
+      nominal_burn_per_lane_hour: 3
+    local:
+      enabled: false
+      name: qwen2.5-coder:7b
+      reasoning_effort: local
+      max_workers: 0
+      runtime_service: local-model
+      runtime_endpoint: http://local-model:11434/v1
+      runtime_health_url: http://local-model:11434/api/tags
+      runtime_image: ollama/ollama:latest
+      local_provider: ollama
+      auto_pull: false
+  reviewer:
+    name: gpt-5.4
+    reasoning_effort: medium
+
+validation:
+  enabled: true
+  context: validate
+  poll_interval_seconds: 10
+  max_concurrent: 1
+  bootstrap_commands:
+    - npm ci
+  commands:
+    - npm test
+    - npm run build
+    - npm run verify:v1
+  post_status: false
+
+reviewer:
+  enabled: true
+  poll_interval_seconds: 15
+  max_concurrent: 1
+  post_mode: comment
+
+runner_manager:
+  enabled: true
+  required_labels:
+    - self-hosted
+    - linux
+    - target-repo-key
+  runner_labels:
+    - self-hosted
+    - linux
+    - target-repo-key
+  image_name: commons-devloop/gh-runner:latest
+  container_prefix: target-repo-key-gh-runner
+  max_runners: 2
+  poll_interval_seconds: 20
+  launch_cooldown_seconds: 180
+  mount_docker_socket: true
+  mount_workspace: false
+  dry_run: true
+
+pr_manager:
+  enabled: true
+  interval_seconds: 10
+  merge_concurrency: 1
+  auto_merge_label:
+  auto_close_superseded_conflicts: false
+
+monitor:
+  enabled: true
+  poll_interval_seconds: 30
+
+safety:
+  pr_only: true
+  auto_merge: false
+  protected_branches:
+    - main
+  protected_paths: []
+  allow_force_push: false
+  require_clean_worktree_before_run: true
+
+budgets:
+  max_estimated_credits_per_day: 100
+  pause_reason_on_budget: daily credit budget reached
+
+branches:
+  work_branch_prefix: autonomous/
+  pr_base_branch: main
+
+roles:
+  enabled:
+    autonomous: true
+    dispatcher: true
+    validator: true
+    reviewer: true
+    runner-manager: true
+    pr-manager: true
+    monitor: true
+    dashboard: true
+
+dashboard:
+  enabled: true
+  port: 4700
+  expose_issue_details: true
+  expose_pr_links: true
