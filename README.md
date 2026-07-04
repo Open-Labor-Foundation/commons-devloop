@@ -6,7 +6,7 @@ commons-devloop replaces GitHub Actions as the execution layer for repository au
 
 Point it at a repository with open issues. It picks them up, writes code, opens pull requests, validates them, reviews them, and merges them — continuously, without per-cycle human intervention. You define the policies. It does the work.
 
-> **Experimental release.** This is functional but still early — rough edges exist. Contributions and issue reports are welcome.
+> **Experimental release.** This is functional but still early — rough edges exist. See [CONTRIBUTING.md](CONTRIBUTING.md) for current contribution status.
 
 ---
 
