@@ -15,8 +15,21 @@ const DEFAULT_MAX_NO_PROGRESS_TURNS = 3;
 const MAX_OBSERVATION_CHARS = 8000;
 const MAX_FILE_CHARS = 2500;
 const DEFAULT_RESEARCH_SUMMARY_OBSERVATION_CHARS = 600;
-const DEFAULT_RESEARCH_EVIDENCE_OBSERVATION_CHARS = 350;
+// Raised from 350: this budget now spends on HTML-stripped body text (see
+// htmlToCleanText) instead of raw markup, so the same char count carries far
+// more real content per source.
+const DEFAULT_RESEARCH_EVIDENCE_OBSERVATION_CHARS = 1500;
+// Cap applied to a fetched page's cleaned (tag/script/style-stripped) text,
+// before the smaller per-source research-evidence budget trims it further.
+// Only used for output shellObservation detects as HTML -- ordinary command
+// output still goes through compactCommandOutput's smaller raw budget.
+const DEFAULT_HTML_OUTPUT_CHARS = 6000;
 const MAX_ITERATIONS = 20;
+// Once this few iterations remain, stop demanding more authority-source
+// research and force a transition to writing -- otherwise a research-heavy
+// issue can spend its entire budget gathering evidence and never leave
+// itself enough turns to write the required files at all.
+const DEFAULT_FORCE_WRITE_ITERATIONS_REMAINING = 6;
 const SPEC_PACK_REQUIRED_FILES = [
   "manifest.yaml",
   "evaluation/research-summary.json",
@@ -97,8 +110,64 @@ function readTextIfExists(worktree, relativePath, maxChars = 1200) {
   return truncate(fs.readFileSync(filePath, "utf8"), maxChars);
 }
 
+function looksLikeHtml(text) {
+  const sample = String(text ?? "").slice(0, 3000);
+  if (/^\s*(<!doctype html|<html)/i.test(sample)) {
+    return true;
+  }
+  // Models often pipe the fetch through grep/head themselves (e.g.
+  // `curl ... | grep -i foo`). For a minified single-line page, grep's
+  // "matching line" can be nearly the whole document but start mid-markup
+  // (observed live: `</style></head><body...`), so it never matches the
+  // doc-start check above. Treat any recognizable HTML structural tag
+  // appearing anywhere in the sample as HTML too.
+  return /<\/?(?:html|head|body|div|span|script|style|meta|title|table|tr|td|a|p|section|nav|footer|header)\b/i.test(sample);
+}
+
+// Strips <script>/<style> blocks and all remaining tags, pulling out
+// title/description plus the leftover body text. Runs against the FULL raw
+// response (no prior truncation) -- for a real page, everything worth
+// reading (standards text, workflow descriptions) lives well past the first
+// ~1200 bytes of <head> boilerplate, so cleaning has to happen before any
+// hard character cut, not after.
+function htmlToCleanText(raw) {
+  const text = String(raw ?? "");
+  const withoutScripts = text
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+  const title = withoutScripts.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const description = withoutScripts.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["'][^>]*>/i)?.[1] ??
+    withoutScripts.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["'][^>]*>/i)?.[1];
+  const body = withoutScripts
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  return [
+    title ? `title: ${title.replace(/\s+/g, " ").trim()}` : "",
+    description ? `description: ${description.replace(/\s+/g, " ").trim()}` : "",
+    body
+  ].filter(Boolean).join("\n");
+}
+
 function compactCommandOutput(text) {
-  return truncate(text, Number(env("AE_LOCAL_CODER_COMMAND_OUTPUT_CHARS", 1200)));
+  const raw = String(text ?? "");
+  if (looksLikeHtml(raw)) {
+    // Deliberately no `|| raw` fallback here: once looksLikeHtml is true,
+    // showing raw markup is never useful, even when extraction legitimately
+    // yields little or nothing (e.g. a `head -N`-truncated fetch that only
+    // captured <head> meta tags with no <title>/description/body text --
+    // observed live against a real irs.gov fetch). Falling back to raw in
+    // that case just re-exposes the exact tag soup this function exists to
+    // strip, and can mislead the model into treating meta-tag attribute
+    // values as real content.
+    const clean = htmlToCleanText(raw);
+    return truncate(clean, Number(env("AE_LOCAL_CODER_HTML_OUTPUT_CHARS", DEFAULT_HTML_OUTPUT_CHARS)));
+  }
+  return truncate(raw, Number(env("AE_LOCAL_CODER_COMMAND_OUTPUT_CHARS", 1200)));
 }
 
 function compactSearchOutput(text) {
@@ -175,26 +244,11 @@ function compactReadFileContent(relativePath, content) {
 
 function compactResearchEvidenceForObservation(output) {
   const raw = String(output ?? "");
-  const withoutScripts = raw
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ");
-  const title = withoutScripts.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
-  const description = withoutScripts.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["'][^>]*>/i)?.[1] ??
-    withoutScripts.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["'][^>]*>/i)?.[1];
-  const text = withoutScripts
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, "\"")
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-  const compact = [
-    title ? `title: ${title.replace(/\s+/g, " ").trim()}` : "",
-    description ? `description: ${description.replace(/\s+/g, " ").trim()}` : "",
-    text
-  ].filter(Boolean).join("\n");
-  return truncate(compact || raw, Number(env(
+  const clean = htmlToCleanText(raw);
+  // Same reasoning as compactCommandOutput: no `|| raw` fallback -- a
+  // legitimately sparse/empty extraction from a meta-tag-only fetch should
+  // stay sparse, not silently re-expose raw markup.
+  return truncate(clean, Number(env(
     "AE_LOCAL_CODER_RESEARCH_EVIDENCE_OBSERVATION_CHARS",
     DEFAULT_RESEARCH_EVIDENCE_OBSERVATION_CHARS
   )));
@@ -634,15 +688,18 @@ async function searchObservation(worktree, entry) {
 function qualityProgress(qualityState) {
   const requiredAuthoritySources = Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
   const hasBlockedCommands = normalizeArray(qualityState.failedCommands).length > 0;
+  const authorityResearchOutstanding = qualityState.requiresAuthorityResearch &&
+    !qualityState.authorityResearchWaived &&
+    qualityState.authorityResearchEvidence.length < requiredAuthoritySources;
   return {
     target_path: qualityState.targetPath || null,
     authority_source_urls_collected: qualityState.authorityResearchEvidence.length,
     required_authority_source_urls: qualityState.requiresAuthorityResearch ? requiredAuthoritySources : 0,
     blocked_commands: normalizeArray(qualityState.failedCommands).slice(-8),
     repo_source_pattern_files: normalizeArray(qualityState.sourcePatternFiles).slice(0, 8),
-    next_required_action: qualityState.requiresAuthorityResearch && qualityState.authorityResearchEvidence.length < requiredAuthoritySources && hasBlockedCommands
+    next_required_action: authorityResearchOutstanding && hasBlockedCommands
       ? "Stop guessing deep source URLs. Search or read related repository research-summary/manifest files under the related industry prefix to identify proven public authority URL patterns, then run curl -sSL against distinct government, education, nonprofit, or open-access authority URLs that return body content."
-      : qualityState.requiresAuthorityResearch && qualityState.authorityResearchEvidence.length < requiredAuthoritySources
+      : authorityResearchOutstanding
         ? "Run curl -sSL against distinct public authority URLs from the issue, repo guardrails, or public authority search results until the required source count is met. Fetch body content; headers-only requests do not count."
       : qualityState.specPack
         ? `Write the required spec-pack files under ${qualityState.targetPath}.`
@@ -856,6 +913,7 @@ function assessContentQuality(relativePath, content, qualityState = {}) {
   }
   if (
     qualityState.requiresAuthorityResearch &&
+    !qualityState.authorityResearchWaived &&
     String(relativePath ?? "").startsWith(String(qualityState.targetPath ?? "")) &&
     qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
   ) {
@@ -871,7 +929,11 @@ function buildQualityState(issueBrief = {}) {
     requiresAuthorityResearch: requiresAuthorityResearch(issueBrief),
     authorityResearchEvidence: [],
     failedCommands: [],
-    sourcePatternFiles: []
+    sourcePatternFiles: [],
+    // Sticky: once the iteration budget runs low, waive the authority-source
+    // minimum for the rest of this run rather than flip-flopping the
+    // requirement turn to turn.
+    authorityResearchWaived: false
   };
 }
 
@@ -1006,7 +1068,11 @@ async function validateLocalCoderQuality(worktree, issueBrief, qualityState) {
     if (missing.length > 0) {
       issues.push(`spec-pack package is missing required files: ${missing.join(", ")}`);
     }
-    if (qualityState.requiresAuthorityResearch && qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))) {
+    if (
+      qualityState.requiresAuthorityResearch &&
+      !qualityState.authorityResearchWaived &&
+      qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
+    ) {
       issues.push(`only ${qualityState.authorityResearchEvidence.length} public authority source URL(s) were researched; at least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} are required`);
     }
     const researchPath = resolveWorktreePath(worktree, `${String(issueBrief.target_path).replace(/\/+$/, "")}/evaluation/research-summary.json`);
@@ -1732,17 +1798,23 @@ function compactObservationForContext(observation) {
   }));
 }
 
-function followupInstruction({ observations, status, authorityResearchDone, qualityState }) {
+function followupInstruction({ observations, status, authorityResearchDone, qualityState, iterationsRemaining, forcedByBudget }) {
+  const budgetSuffix = Number.isFinite(iterationsRemaining)
+    ? ` (${iterationsRemaining} iteration${iterationsRemaining === 1 ? "" : "s"} remaining in this run.)`
+    : "";
   if (observations.some((observation) => observation.type === "repeat_action")) {
-    return `Your last action repeated earlier work and was rejected. Do not repeat the same read/search/command set or any blocked command. Gather different authority evidence from a different public authority host/path, search the repo for a better source direction, or write the implementation under ${qualityState.targetPath || "the target path"}.`;
+    return `Your last action repeated earlier work and was rejected. Do not repeat the same read/search/command set or any blocked command. Gather different authority evidence from a different public authority host/path, search the repo for a better source direction, or write the implementation under ${qualityState.targetPath || "the target path"}.${budgetSuffix}`;
+  }
+  if (forcedByBudget) {
+    return `There is not enough of the iteration budget left to keep researching${budgetSuffix} Stop gathering new authority sources now and write the required files under ${qualityState.targetPath || "the target path"} using whatever evidence has already been gathered, even if it feels incomplete -- a partially-sourced package that gets written beats one that never gets written. Set done true once written.`;
   }
   if (status) {
-    return "Continue if more work is needed. Set done true only when the implementation is complete.";
+    return `Continue if more work is needed. Set done true only when the implementation is complete.${budgetSuffix}`;
   }
   if (authorityResearchDone && qualityState.specPack) {
-    return `Authority-source research is complete with ${qualityState.authorityResearchEvidence.length} public authority URL(s). Do not run more research-only reads, searches, or source commands. Write the required spec-pack files under ${qualityState.targetPath}.`;
+    return `Authority-source research is complete with ${qualityState.authorityResearchEvidence.length} public authority URL(s). Do not run more research-only reads, searches, or source commands. Write the required spec-pack files under ${qualityState.targetPath}.${budgetSuffix}`;
   }
-  return `No repository changes are present yet. Continue with new authority-source evidence or write the implementation under ${qualityState.targetPath || "the target path"}.`;
+  return `No repository changes are present yet. Continue with new authority-source evidence or write the implementation under ${qualityState.targetPath || "the target path"}.${budgetSuffix}`;
 }
 
 function compactIssueBriefForContext(issueBrief = {}) {
@@ -1960,6 +2032,7 @@ Allowed JSON fields:
 - "summary": short note about what changed or what you need next.
 
 Rules:
+- This run has a hard, finite iteration budget (each follow-up message states how many iterations remain). Research is only useful if it leaves enough turns to actually write the required files -- budget accordingly rather than researching indefinitely.
 - The target repository guidance supplied in initial_context.repo_quality_contract or working_context.repo_quality_contract is binding. Use it as the local equivalent of the repo's Codex instructions and audit contract.
 - Prefer reading/searching before writing unless the required edit is obvious.
 - For the first response on a new issue, return a small read/search/command action to inspect the repository shape and source requirements; do not try to produce the whole implementation from startup context alone.
@@ -2049,8 +2122,13 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
 
   const noOpActionFingerprints = new Set();
   const maxNoProgressTurns = Number(env("AE_LOCAL_CODER_MAX_NO_PROGRESS_TURNS", DEFAULT_MAX_NO_PROGRESS_TURNS));
+  const maxIterations = Number(env("AE_LOCAL_CODER_MAX_ITERATIONS", MAX_ITERATIONS));
+  const forceWriteIterationsRemaining = Number(env(
+    "AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING",
+    DEFAULT_FORCE_WRITE_ITERATIONS_REMAINING
+  ));
   let consecutiveNoProgressTurns = 0;
-  for (let iteration = 1; iteration <= Number(env("AE_LOCAL_CODER_MAX_ITERATIONS", MAX_ITERATIONS)); iteration += 1) {
+  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     process.stderr.write(`Lane coder iteration ${iteration}\n`);
     const response = await chatWithRetry(chat);
     process.stdout.write(`\n[lane-coder response ${iteration}]\n${response}\n`);
@@ -2134,13 +2212,22 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
           : action)
       });
     }
+    const iterationsRemaining = maxIterations - iteration;
+    const authorityResearchMet = qualityState.authorityResearchEvidence.length >=
+      Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
+    const forcedByBudget = !authorityResearchMet && !status && iterationsRemaining <= forceWriteIterationsRemaining;
+    if (forcedByBudget) {
+      qualityState.authorityResearchWaived = true;
+    }
     const authorityResearchDone = qualityState.requiresAuthorityResearch &&
-      qualityState.authorityResearchEvidence.length >= Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
+      (authorityResearchMet || qualityState.authorityResearchWaived);
     const instruction = followupInstruction({
       observations,
       status,
       authorityResearchDone,
-      qualityState
+      qualityState,
+      iterationsRemaining,
+      forcedByBudget: qualityState.authorityResearchWaived && !authorityResearchMet
     });
     messages.push({
       role: "user",
@@ -2206,12 +2293,29 @@ async function finalizeLocalPullRequest(worktree) {
     await requireCommandSuccess("git", ["commit", "-m", `Resolve issue #${issueNumber}`], { cwd: worktree });
   }
 
-  await requireCommandSuccess("git", ["push", "-u", "origin", `HEAD:${branchName}`], {
+  // Force-push deliberately: this is the coder's own dedicated one-shot
+  // branch for this issue, not a shared/collaborative one, and the
+  // dispatcher hands out a brand-new worktree (rebuilt from main) on every
+  // attempt rather than reusing the previous attempt's local branch state.
+  // A plain push non-fast-forwards the moment any earlier attempt --
+  // including one that hit the iteration limit without finishing -- already
+  // pushed something under this same branch name, which otherwise silently
+  // discards this run's work with a rejected push (observed live on
+  // labor-commons issue #11).
+  await requireCommandSuccess("git", ["push", "--force", "-u", "origin", `HEAD:${branchName}`], {
     cwd: worktree,
     timeoutMs: Number(env("AE_LOCAL_CODER_GIT_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS))
   });
 
-  const existing = await runCommand("gh", ["pr", "view", branchName, "--json", "url", "--jq", ".url"], {
+  // `gh pr view <branch>` returns the most recent PR for that head branch
+  // regardless of state -- a CLOSED PR from an earlier, abandoned attempt on
+  // this same branch name (observed live: labor-commons issue #11's PR #36,
+  // closed when its stale branch was deleted during a git-history cleanup)
+  // otherwise looks identical to a genuinely still-open PR here, so every
+  // subsequent run silently no-ops instead of opening a fresh PR -- the
+  // dispatcher then keeps re-dispatching the issue forever since no open PR
+  // ever actually appears. Only short-circuit on an OPEN PR.
+  const existing = await runCommand("gh", ["pr", "view", branchName, "--json", "url,state", "--jq", "if .state == \"OPEN\" then .url else \"\" end"], {
     cwd: worktree,
     timeoutMs: Number(env("AE_LOCAL_CODER_GH_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS))
   });

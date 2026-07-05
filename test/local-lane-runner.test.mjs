@@ -383,6 +383,31 @@ process.exit(0);
   );
 }
 
+// Simulates `gh pr view <branch>` finding a PR that's CLOSED (not OPEN) for
+// that head branch -- e.g. an earlier attempt's PR that was closed when its
+// branch got deleted. Real `gh` with `--jq 'if .state == "OPEN" then .url
+// else "" end'` would exit 0 with empty stdout in this case; this stub
+// reproduces that exact shape so the fix under test (checking .state, not
+// just whether a PR object exists at all) is exercised.
+function createMockGhWithClosedPr(binDir) {
+  fs.writeFileSync(
+    path.join(binDir, "gh"),
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "pr" && args[1] === "view") {
+  process.stdout.write("\\n");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "create") {
+  process.stdout.write("https://example.test/pr/2\\n");
+  process.exit(0);
+}
+process.exit(0);
+`,
+    { mode: 0o755 }
+  );
+}
+
 test("local lane runner's final PR sweep fixes a pre-existing markdown file the model never touched", async () => {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-markdownlint-mock-"));
   const logPath = path.join(binDir, "invocations.log");
@@ -442,6 +467,118 @@ test("local lane runner's final PR sweep fixes a pre-existing markdown file the 
     assert.match(content, /<!-- auto-fixed -->/);
     const invocations = fs.readFileSync(logPath, "utf8");
     assert.match(invocations, /--fix pre-existing\.md/);
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner opens a fresh PR when the only existing PR for this branch is closed", async () => {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-gh-closed-pr-mock-"));
+  createMockGhWithClosedPr(binDir);
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        write_files: [{ path: "answer.txt", content: "resolved again\n" }],
+        done: true
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      env: {
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        AE_LOCAL_CODER_CREATE_PR: "1",
+        AE_ISSUE_NUMBER: "11",
+        AE_BRANCH_NAME: "autonomous/11-test",
+        AE_PR_BASE_BRANCH: "main"
+      },
+      setupWorktree: (worktree) => {
+        const originDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-origin-"));
+        execFileSync("git", ["init", "--bare", "--initial-branch=main", originDir], { stdio: "ignore" });
+        execFileSync("git", ["remote", "add", "origin", originDir], { cwd: worktree, stdio: "ignore" });
+        execFileSync("git", ["push", "origin", "HEAD:main"], { cwd: worktree, stdio: "ignore" });
+        execFileSync("git", ["fetch", "origin"], { cwd: worktree, stdio: "ignore" });
+      }
+    });
+
+    assert.match(result.stdout, /Lane coder PR created: https:\/\/example\.test\/pr\/2/);
+    assert.doesNotMatch(result.stdout, /PR already exists/);
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner force-pushes its branch so an earlier attempt's unrelated push doesn't reject this one", async () => {
+  // Reproduces the exact shape observed live: the dispatcher hands out a
+  // brand-new worktree (rebuilt from main) on every attempt, but an earlier
+  // attempt -- including one that never finished -- may have already pushed
+  // something under this same branch name. A plain (non-force) push
+  // non-fast-forwards in that case, silently discarding the run's work.
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-gh-force-push-mock-"));
+  createMockGh(binDir);
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        write_files: [{ path: "answer.txt", content: "this attempt's content\n" }],
+        done: true
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      env: {
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        AE_LOCAL_CODER_CREATE_PR: "1",
+        AE_ISSUE_NUMBER: "11",
+        AE_BRANCH_NAME: "autonomous/11-test",
+        AE_PR_BASE_BRANCH: "main"
+      },
+      setupWorktree: (worktree) => {
+        const originDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-origin-"));
+        execFileSync("git", ["init", "--bare", "--initial-branch=main", originDir], { stdio: "ignore" });
+        execFileSync("git", ["remote", "add", "origin", originDir], { cwd: worktree, stdio: "ignore" });
+        execFileSync("git", ["push", "origin", "HEAD:main"], { cwd: worktree, stdio: "ignore" });
+
+        // Simulate an earlier, unrelated attempt's push under the same
+        // branch name from a completely different worktree (no shared
+        // history with this run's HEAD).
+        const staleWorktree = fs.mkdtempSync(path.join(os.tmpdir(), "ae-stale-attempt-"));
+        execFileSync("git", ["clone", originDir, staleWorktree], { stdio: "ignore" });
+        fs.writeFileSync(path.join(staleWorktree, "answer.txt"), "an earlier, abandoned attempt's content\n");
+        execFileSync("git", ["add", "answer.txt"], { cwd: staleWorktree, stdio: "ignore" });
+        execFileSync("git", ["commit", "-m", "earlier abandoned attempt"], {
+          cwd: staleWorktree,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test",
+            GIT_AUTHOR_EMAIL: "test@example.com",
+            GIT_COMMITTER_NAME: "Test",
+            GIT_COMMITTER_EMAIL: "test@example.com"
+          }
+        });
+        execFileSync("git", ["push", "origin", "HEAD:autonomous/11-test"], { cwd: staleWorktree, stdio: "ignore" });
+
+        execFileSync("git", ["fetch", "origin"], { cwd: worktree, stdio: "ignore" });
+      }
+    });
+
+    assert.match(result.stdout, /Lane coder PR created:/);
+
+    const pushed = execFileSync(
+      "git",
+      ["show", "origin/autonomous/11-test:answer.txt"],
+      { cwd: result.worktree, encoding: "utf8" }
+    );
+    assert.equal(pushed, "this attempt's content\n");
   } finally {
     server.close();
   }
@@ -974,6 +1111,123 @@ test("local lane runner accepts command object entries", async () => {
   }
 });
 
+test("local lane runner extracts real body text from HTML command output instead of truncating it away as boilerplate", async () => {
+  // Pads <head> past the old 1200-char raw-truncation point so a naive
+  // "truncate then strip tags" pipeline would cut the response down to
+  // boilerplate and never reach REAL_BODY_MARKER in <body>.
+  const fetchCommand = "pad=$(printf '<!--pad-->%.0s' $(seq 1 150)); " +
+    "printf '<!DOCTYPE html><html><head>%s<title>Test Standard</title></head>" +
+    "<body><p>REAL_BODY_MARKER real standards content beyond the old truncation point.</p></body></html>' " +
+    "\"$pad\" > page.html && curl -sSL \"file://$(pwd)/page.html\"";
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        commands: [fetchCommand],
+        summary: "fetched page"
+      },
+      {
+        write_files: [
+          { path: "answer.txt", content: "done\n" }
+        ],
+        done: true,
+        summary: "done"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({ baseUrl });
+    assert.match(result.stdout, /REAL_BODY_MARKER/);
+    assert.match(result.stdout, /title: Test Standard/);
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner never falls back to raw markup when an HTML fetch has nothing extractable", async () => {
+  // Reproduces a real live case: the model piped a fetch through `head -N`
+  // itself, so only <head> meta tags (no <title>, no description, no body
+  // text) ever reached our process. htmlToCleanText correctly extracts
+  // nothing from that -- the bug was falling back to the raw markup instead
+  // of accepting the (correctly) sparse result, re-exposing exactly the tag
+  // soup this function exists to strip.
+  const fetchCommand = "printf '<!DOCTYPE html><html><head>" +
+    "<meta charset=\"utf-8\" /><meta name=\"robots\" content=\"index, follow\" />" +
+    "<meta name=\"viewport\" content=\"width=device-width\" />' " +
+    "> page.html && curl -sSL \"file://$(pwd)/page.html\"";
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        commands: [fetchCommand],
+        summary: "fetched meta-only fragment"
+      },
+      {
+        write_files: [
+          { path: "answer.txt", content: "done\n" }
+        ],
+        done: true,
+        summary: "done"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({ baseUrl });
+    // Check the observation's own stdout field specifically -- the model's
+    // *own* echoed command legitimately contains literal "<meta" text
+    // elsewhere in the transcript, so asserting against the whole log would
+    // false-fail. The compacted observation for this command must be empty
+    // (correctly sparse), not the raw markup that command produced.
+    const observationsBlock = result.stdout.split("[lane-coder observations]")[1].split("[lane-coder")[0];
+    const observation = JSON.parse(observationsBlock.trim())[0];
+    assert.equal(observation.type, "command");
+    assert.equal(observation.stdout, "");
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner treats a grep-piped HTML fragment as HTML even when it doesn't start with <html>", async () => {
+  // Mirrors what was observed live: the model pipes curl through its own
+  // grep, and for a minified single-line page grep's "matching line" can be
+  // nearly the whole document but start mid-markup (e.g. `</style></head>
+  // <body...`), never matching a doc-start-only HTML check.
+  const fetchCommand = "pad=$(printf '<!--pad-->%.0s' $(seq 1 150)); " +
+    "printf '<!DOCTYPE html><html><head>%s<style>body{color:red}</style>" +
+    "<title>Test Standard</title></head>" +
+    "<body><p>REAL_BODY_MARKER real standards content beyond the old truncation point.</p></body></html>' " +
+    "\"$pad\" > page.html && curl -sSL \"file://$(pwd)/page.html\" | grep -o '</style>.*'";
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        commands: [fetchCommand],
+        summary: "fetched page via grep"
+      },
+      {
+        write_files: [
+          { path: "answer.txt", content: "done\n" }
+        ],
+        done: true,
+        summary: "done"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({ baseUrl });
+    assert.match(result.stdout, /REAL_BODY_MARKER/);
+    assert.match(result.stdout, /title: Test Standard/);
+  } finally {
+    server.close();
+  }
+});
+
 test("local lane runner applies search globs without corrupting the query", async () => {
   const { server, baseUrl } = await startOllamaStub({
     models: ["qwen2.5-coder:7b"],
@@ -1032,6 +1286,70 @@ Use public authoritative source research.
         return true;
       }
     );
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner forces a write once the iteration budget runs low, waiving the authority-source minimum", async () => {
+  const prompt = `Implement issue #1
+
+## Target Path
+agents/catalog/industry-overlays/information-software-and-digital-media/software-business-operations-specialist/
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl, requests } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { commands: ["true # filler 1"], summary: "iteration 1: no real research yet" },
+      { commands: ["true # filler 2"], summary: "iteration 2: still no real research" },
+      {
+        write_files: [
+          {
+            path: "agents/catalog/industry-overlays/information-software-and-digital-media/software-business-operations-specialist/answer.txt",
+            content: "written under budget pressure\n"
+          }
+        ],
+        done: true,
+        summary: "forced write with no authority evidence gathered"
+      }
+    ]
+  });
+
+  try {
+    // The run still fails overall -- the model only wrote one filler file,
+    // not the full required spec-pack set, and that check is a separate,
+    // legitimate gate this fix does NOT waive. What's under test is that the
+    // *authority-source* complaint specifically never appears, proving only
+    // that gate got waived once the budget ran low.
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        prompt,
+        env: {
+          AE_LOCAL_CODER_MAX_ITERATIONS: "3",
+          AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING: "2"
+        }
+      }),
+      (error) => {
+        assert.match(error.stderr, /Lane coder quality gate failed/);
+        assert.doesNotMatch(error.stderr, /public authority source URL\(s\) were researched/);
+        assert.match(error.stderr, /missing required files/);
+        return true;
+      }
+    );
+
+    // With AE_LOCAL_CODER_MAX_ITERATIONS=3 and
+    // AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING=2, only 2 iterations
+    // remain right after iteration 1 -- so the forced-write instruction
+    // should already be in the request sent for iteration 2.
+    const secondTurnMessages = requests
+      .filter((request) => request.body?.messages)
+      .at(1).body.messages;
+    const lastUserMessage = [...secondTurnMessages].reverse().find((message) => message.role === "user");
+    assert.match(lastUserMessage.content, /not enough of the iteration budget left/);
   } finally {
     server.close();
   }
