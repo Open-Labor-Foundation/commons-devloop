@@ -19,4 +19,3 @@ These repositories are in an experimental state. Security fixes are applied to t
 - Hardcoded credentials or secrets (report immediately)
 
 Out of scope: vulnerabilities in dependencies (report upstream), issues requiring physical access, social engineering.
-
