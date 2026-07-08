@@ -1,0 +1,213 @@
+version: 2
+
+repo:
+  key: labor-commons
+  github_slug: Open-Labor-Foundation/labor-commons
+  # Catalog layout: lets the coder derive a spec.yaml target_path from an
+  # issue's Queue Agent Slug (industry-overlays::{section}::{agent}). Without
+  # this, target_path is null and section-based sibling authority-source
+  # harvesting never fires.
+  catalog:
+    overlay_root: catalog/naics-overlays
+    spec_filename: spec.yaml
+    slug_prefix: industry-overlays
+  default_branch: main
+
+lifecycle:
+  enabled: true
+  target_mode: open
+  target_name: all-open-spec-pack-issues
+  pause_when_target_complete: true
+  pause_when_budget_exhausted: true
+  # 1 is the effective floor -- config.mjs's asInteger clamps this to a
+  # minimum of 1 no matter what's written here, so it can never fully reach
+  # 0. That means remainingNewPrSlots = max(0, max_parallel_prs - active)
+  # stays 0 (blocking new-issue dispatch) only while at least 1 PR remains
+  # open; the moment the last one merges, one new-issue slot opens up again.
+  # Since the actual goal is to stop entirely once the backlog clears (not
+  # pick up one more), disable dispatcher.enabled/roles.enabled.dispatcher
+  # once the last of the remaining PRs merges, rather than relying on this
+  # value alone.
+  max_parallel_prs: 1
+  max_runs_per_day: 16
+
+issue_source:
+  labels: []
+  required_issue_prefix: "spec-pack: "
+
+# Model changed 2026-07-07: Qwen3-Coder-30B-A3B-Instruct was a code-generation
+# specialist model doing a general-knowledge/regulatory-research job, with no
+# search-tool access -- it fabricated non-existent source URLs and ignored
+# explicit instructions (see labor-commons remediation session for the full
+# diagnosis). The Featherless plan was upgraded the same day to remove the
+# parameter cap entirely, so deepseek-ai/DeepSeek-V3.2 (confirmed live via
+# direct API probe, HTTP 200) is used instead of the interim capped choice
+# (mistralai/Mistral-Large-Instruct-2411): it's DeepSeek's newest frontier-
+# scale model and the strongest of the confirmed-available options at literal
+# instruction-following and structured-output fidelity, which is what this
+# repo's schema/contract adherence actually needs. It still has no live search
+# grounding, so infra/scripts/validate-spec-yaml.mjs's URL-reachability check
+# remains the real backstop against fabricated citations regardless of model.
+# Codex/gpt-5.4 (the secondary lane in AE's own template) is not usable here --
+# no valid subscription/inference access -- so this repo runs primary-lane-only
+# via Featherless, same as before.
+dispatcher:
+  enabled: true
+  poll_interval_seconds: 5
+  primary_max_workers: 1
+  secondary_max_workers: 0
+  local_max_workers: 0
+
+models:
+  dispatcher:
+    primary:
+      provider: openai_compatible
+      name: deepseek-ai/DeepSeek-V3.2
+      reasoning_effort: local
+      pause_threshold_used_percent: 100
+      weekly_pause_threshold_used_percent: 100
+      reserve_burn_window_minutes: 300
+      nominal_burn_per_lane_hour: 0
+      provider_concurrency_budget_units: 2
+      request_cost_units: 1
+      runtime_endpoint: https://api.featherless.ai/v1
+    secondary:
+      name: deepseek-ai/DeepSeek-V3.2
+      reasoning_effort: high
+      pause_threshold_used_percent: 70
+      weekly_pause_threshold_used_percent: 70
+      reserve_burn_window_minutes: 300
+      nominal_burn_per_lane_hour: 3
+    local:
+      enabled: false
+      name: qwen2.5-coder:32b
+      reasoning_effort: local
+      max_workers: 0
+      runtime_service: local-model
+      runtime_endpoint: http://local-model:11434/v1
+      runtime_health_url: http://local-model:11434/api/tags
+      runtime_image: ollama/ollama:latest
+      local_provider: ollama
+      num_thread: 28
+      num_ctx: 16384
+      keep_alive: 30m
+      auto_pull: false
+  reviewer:
+    provider: openai_compatible
+    name: deepseek-ai/DeepSeek-V3.2
+    reasoning_effort: medium
+    runtime_endpoint: https://api.featherless.ai/v1
+    api_key_env: FEATHERLESS_REVIEWER_API_KEY
+
+validation:
+  enabled: true
+  context: validate
+  poll_interval_seconds: 10
+  max_concurrent: 1
+  # labor-commons has no package.json — it's a spec/content catalog, not a
+  # Node app. Real CI (.github/workflows/ci.yml) installs and runs
+  # markdownlint-cli2 and markdown-link-check directly.
+  bootstrap_commands:
+    - npm install -g markdownlint-cli2 markdown-link-check
+    - npm install --no-save yaml
+  commands:
+    # Scoped to this PR's own changed markdown files rather than the whole
+    # tree: real CI lints "**/*.md" repo-wide and has been red on main since
+    # 2026-06-21 (985 pre-existing files with violations, unrelated to any
+    # single PR). Gating every PR on that baseline debt would make merging
+    # anything here impossible.
+    - |
+      files=$(git diff --name-only "origin/${AE_PR_BASE_BRANCH:-main}...HEAD" -- '*.md')
+      if [ -n "$files" ]; then markdownlint-cli2 $files "#node_modules"; else echo "no markdown files changed in this PR"; fi
+    - |
+      files=$(git diff --name-only "origin/${AE_PR_BASE_BRANCH:-main}...HEAD" -- '*.md')
+      if [ -n "$files" ]; then echo "$files" | xargs markdown-link-check --config .mlc_config.json; else echo "no markdown files changed in this PR"; fi
+    # Real schema check against what commons-board/commons-crew actually
+    # consume -- this is the check that was missing entirely when the 15
+    # manifest.yaml-format specialists and 50 schema-drifted specialists
+    # merged undetected. Scoped to changed spec.yaml files only.
+    - |
+      files=$(git diff --name-only "origin/${AE_PR_BASE_BRANCH:-main}...HEAD" -- 'catalog/naics-overlays/**/spec.yaml')
+      if [ -n "$files" ]; then node infra/scripts/validate-spec-yaml.mjs $files; else echo "no spec.yaml files changed in this PR"; fi
+  post_status: false
+
+reviewer:
+  enabled: true
+  poll_interval_seconds: 15
+  max_concurrent: 4
+  post_mode: comment
+
+runner_manager:
+  enabled: true
+  required_labels:
+    - self-hosted
+    - linux
+    - labor-commons
+  runner_labels:
+    - self-hosted
+    - linux
+    - labor-commons
+  image_name: commons-devloop/gh-runner:latest
+  container_prefix: labor-commons-gh-runner
+  max_runners: 2
+  poll_interval_seconds: 20
+  launch_cooldown_seconds: 180
+  mount_docker_socket: true
+  mount_workspace: false
+  dry_run: true
+
+pr_manager:
+  # Human-gated by default: the pipeline creates and validates PRs against
+  # labor-commons main, but does NOT auto-merge. Flip pr_manager.enabled +
+  # safety.auto_merge to true to enable fully-autonomous merge once you're
+  # confident in the generation quality (see the 2026-07 remediation: the
+  # pipeline now produces catalog-quality specs, but autonomy stays opt-in).
+  enabled: false
+  interval_seconds: 10
+  merge_concurrency: 1
+  auto_merge_label:
+  auto_close_superseded_conflicts: true
+
+monitor:
+  enabled: true
+  poll_interval_seconds: 30
+
+safety:
+  pr_only: true
+  auto_merge: false
+  protected_branches:
+    - main
+  protected_paths: []
+  allow_force_push: false
+  require_clean_worktree_before_run: true
+
+budgets:
+  max_estimated_credits_per_day: 100
+  pause_reason_on_budget: daily credit budget reached
+
+branches:
+  work_branch_prefix: autonomous/
+  pr_base_branch: main
+
+roles:
+  enabled:
+    autonomous: true
+    dispatcher: true
+    validator: true
+    reviewer: true
+    runner-manager: true
+    pr-manager: true
+    monitor: true
+    dashboard: true
+
+dashboard:
+  enabled: true
+  port: 4700
+  expose_issue_details: true
+  expose_pr_links: true
+
+retention:
+  enabled: true
+  worktree_max_age_hours: 1
+  run_log_max_age_days: 2
+  output_max_age_days: 2
