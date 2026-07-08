@@ -30,17 +30,6 @@ const MAX_ITERATIONS = 20;
 // issue can spend its entire budget gathering evidence and never leave
 // itself enough turns to write the required files at all.
 const DEFAULT_FORCE_WRITE_ITERATIONS_REMAINING = 6;
-const SPEC_PACK_REQUIRED_FILES = [
-  "manifest.yaml",
-  "evaluation/research-summary.json",
-  "evaluation/scenarios.md",
-  "evaluation/functionality-map.json",
-  "evaluation/results.json",
-  "readiness/evidence.json",
-  "readiness/release.md",
-  "deployment/package.md",
-  "marketing/readiness.md"
-];
 const LOW_QUALITY_PATTERNS = [
   { pattern: /\bexample\.com\b/i, reason: "example.com placeholder source" },
   { pattern: /\bplaceholder\b/i, reason: "placeholder text" },
@@ -55,16 +44,7 @@ const LOW_QUALITY_PATTERNS = [
   { pattern: /\bDeployment Note\s+1\b/i, reason: "generic deployment note" },
   { pattern: /\bCommercialization Note\s+1\b/i, reason: "generic commercialization note" }
 ];
-const REPO_GUIDANCE_FILES = [
-  ".github/copilot-instructions.md",
-  ".github/ISSUE_TEMPLATE/industry-overlay-spec-pack.yml",
-  "docs/agent-delivery-contract.md",
-  "docs/spec-pack-audit-rubric.md",
-  "docs/naics-spec-pack-workflow.md",
-  "config/spec-pack-research-contract.json",
-  "config/spec-pack-functional-abilities.json",
-  "infra/scripts/audit-spec-pack.mjs"
-];
+const REPO_GUIDANCE_FILES = [".github/copilot-instructions.md"];
 
 function env(name, fallback = "") {
   const value = process.env[name];
@@ -701,9 +681,7 @@ function qualityProgress(qualityState) {
       ? "Stop guessing deep source URLs. Search or read related repository research-summary/manifest files under the related industry prefix to identify proven public authority URL patterns, then run curl -sSL against distinct government, education, nonprofit, or open-access authority URLs that return body content."
       : authorityResearchOutstanding
         ? "Run curl -sSL against distinct public authority URLs from the issue, repo guardrails, or public authority search results until the required source count is met. Fetch body content; headers-only requests do not count."
-      : qualityState.specPack
-        ? `Write the required spec-pack files under ${qualityState.targetPath}.`
-        : "Write the implementation."
+      : "Write the implementation."
   };
 }
 
@@ -751,10 +729,6 @@ function openAuthoritySourceUrl(url) {
   }
 }
 
-function isSpecPackIssue(issueBrief = {}) {
-  return String(issueBrief.target_path ?? "").startsWith("agents/catalog/industry-overlays/");
-}
-
 function requiresAuthorityResearch(issueBrief = {}) {
   const text = [
     issueBrief.requested_change,
@@ -763,7 +737,7 @@ function requiresAuthorityResearch(issueBrief = {}) {
     issueBrief.materialization_expectations,
     issueBrief.deployment_expectations
   ].join("\n").toLowerCase();
-  return isSpecPackIssue(issueBrief) && /authority|authoritative|source|research|owasp|cfr|nist|cisa/.test(text);
+  return /authority|authoritative|source|research|owasp|cfr|nist|cisa/.test(text);
 }
 
 function recordAuthorityResearchEvidence(qualityState, observation) {
@@ -899,10 +873,6 @@ function researchEvidenceHasBody(observation) {
   return text.length >= Number(env("AE_LOCAL_CODER_MIN_RESEARCH_BODY_CHARS", 120));
 }
 
-function readJsonFile(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, "utf8"));
-}
-
 function assessContentQuality(relativePath, content, qualityState = {}) {
   const issues = [];
   const text = String(content ?? "");
@@ -925,7 +895,6 @@ function assessContentQuality(relativePath, content, qualityState = {}) {
 function buildQualityState(issueBrief = {}) {
   return {
     targetPath: String(issueBrief.target_path ?? ""),
-    specPack: isSpecPackIssue(issueBrief),
     requiresAuthorityResearch: requiresAuthorityResearch(issueBrief),
     authorityResearchEvidence: [],
     failedCommands: [],
@@ -945,109 +914,6 @@ async function changedFiles(worktree) {
   return result.stdout.split(/\r?\n/).filter(Boolean);
 }
 
-function validateScenarioResults(filePath, issues) {
-  let body;
-  try {
-    body = readJsonFile(filePath);
-  } catch (error) {
-    issues.push(`evaluation/results.json is not valid JSON: ${error.message}`);
-    return;
-  }
-  const scenarioResults = Array.isArray(body.scenario_results) ? body.scenario_results : [];
-  const scenarioCount = Number(body.scenario_count ?? scenarioResults.length);
-  const passCount = Number(body.pass_count ?? scenarioResults.filter((entry) => String(entry?.status ?? "").toLowerCase() === "pass").length);
-  if (scenarioCount < Number(env("AE_LOCAL_CODER_MIN_SCENARIOS", 10))) {
-    issues.push(`evaluation/results.json records only ${scenarioCount} scenario(s); at least 10 are required`);
-  }
-  if (passCount < Number(env("AE_LOCAL_CODER_MIN_PASSING_SCENARIOS", 10))) {
-    issues.push(`evaluation/results.json records only ${passCount} passing scenario(s); at least 10 are required`);
-  }
-  if (body.accuracy_acceptance_met !== true) {
-    issues.push("evaluation/results.json must record accuracy_acceptance_met: true");
-  }
-  if (body.research_summary_complete !== true) {
-    issues.push("evaluation/results.json must record research_summary_complete: true");
-  }
-}
-
-function validateResearchSummary(filePath, qualityState, issues) {
-  let body;
-  try {
-    body = readJsonFile(filePath);
-  } catch (error) {
-    issues.push(`evaluation/research-summary.json is not valid JSON: ${error.message}`);
-    return;
-  }
-  const sources = Array.isArray(body.authoritative_sources)
-    ? body.authoritative_sources
-    : Array.isArray(body.authority_sources)
-      ? body.authority_sources
-      : [];
-  const minSources = Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
-  if (sources.length < minSources) {
-    issues.push(`evaluation/research-summary.json records only ${sources.length} authoritative source(s); at least ${minSources} are required`);
-  }
-  for (const [index, source] of sources.entries()) {
-    const url = String(source?.url ?? source?.location ?? "").trim();
-    if (!source?.title || !source?.publisher || !url || !source?.authority_rationale && !source?.authority_reason) {
-      issues.push(`authoritative source ${index + 1} is missing title, publisher, url, or authority rationale`);
-    }
-    if (/example\.com/i.test(url)) {
-      issues.push(`authoritative source ${index + 1} uses example.com`);
-    }
-    if (url && openAuthoritySourceUrl(url)) {
-      if (!qualityState.authorityResearchEvidence.includes(url)) {
-        qualityState.authorityResearchEvidence.push(url);
-      }
-    } else if (url) {
-      issues.push(`authoritative source ${index + 1} is not a government or open-access authority source URL`);
-    }
-  }
-}
-
-function validateReadinessEvidence(filePath, issues) {
-  let body;
-  try {
-    body = readJsonFile(filePath);
-  } catch (error) {
-    issues.push(`readiness/evidence.json is not valid JSON: ${error.message}`);
-    return;
-  }
-  if (body.delivery_status !== "market-ready") {
-    issues.push("readiness/evidence.json must record delivery_status: market-ready");
-  }
-  if (body.runtime_strategy !== "spec_only") {
-    issues.push("readiness/evidence.json must record runtime_strategy: spec_only");
-  }
-  if (body.human_verification?.recorded !== true) {
-    issues.push("readiness/evidence.json must record human_verification.recorded: true");
-  }
-  const evaluation = body.evaluation_summary ?? body.validation_summary ?? {};
-  const scenarioCount = Number(evaluation.scenario_count ?? 0);
-  const passCount = Number(evaluation.pass_count ?? 0);
-  if (scenarioCount < Number(env("AE_LOCAL_CODER_MIN_SCENARIOS", 10)) || passCount < Number(env("AE_LOCAL_CODER_MIN_PASSING_SCENARIOS", 10))) {
-    issues.push("readiness/evidence.json must summarize at least 10 passing evaluation scenarios");
-  }
-}
-
-async function validateSpecPackAudit(worktree, issueBrief, issues) {
-  const parts = parseSpecPackTargetParts(issueBrief.target_path);
-  const auditScript = path.join(worktree, "infra/scripts/audit-spec-pack.mjs");
-  if (!parts || !fs.existsSync(auditScript)) {
-    return;
-  }
-  const result = await runCommand(
-    process.execPath,
-    ["infra/scripts/audit-spec-pack.mjs", "--industry", parts.industrySlug, "--agent", parts.agentSlug],
-    {
-      cwd: worktree,
-      timeoutMs: Number(env("AE_LOCAL_CODER_AUDIT_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS))
-    }
-  );
-  if (result.status !== 0) {
-    issues.push(`target repo spec-pack audit failed: ${truncate(result.stdout || result.stderr, 3000)}`);
-  }
-}
 
 async function validateLocalCoderQuality(worktree, issueBrief, qualityState) {
   const issues = [];
@@ -1062,34 +928,12 @@ async function validateLocalCoderQuality(worktree, issueBrief, qualityState) {
     }
   }
 
-  if (qualityState.specPack) {
-    const requiredPaths = specPackRequiredPaths(issueBrief.target_path);
-    const missing = requiredPaths.filter((file) => !fs.existsSync(resolveWorktreePath(worktree, file)));
-    if (missing.length > 0) {
-      issues.push(`spec-pack package is missing required files: ${missing.join(", ")}`);
-    }
-    if (
-      qualityState.requiresAuthorityResearch &&
-      !qualityState.authorityResearchWaived &&
-      qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
-    ) {
-      issues.push(`only ${qualityState.authorityResearchEvidence.length} public authority source URL(s) were researched; at least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} are required`);
-    }
-    const researchPath = resolveWorktreePath(worktree, `${String(issueBrief.target_path).replace(/\/+$/, "")}/evaluation/research-summary.json`);
-    const resultsPath = resolveWorktreePath(worktree, `${String(issueBrief.target_path).replace(/\/+$/, "")}/evaluation/results.json`);
-    const evidencePath = resolveWorktreePath(worktree, `${String(issueBrief.target_path).replace(/\/+$/, "")}/readiness/evidence.json`);
-    if (fs.existsSync(researchPath)) {
-      validateResearchSummary(researchPath, qualityState, issues);
-    }
-    if (fs.existsSync(resultsPath)) {
-      validateScenarioResults(resultsPath, issues);
-    }
-    if (fs.existsSync(evidencePath)) {
-      validateReadinessEvidence(evidencePath, issues);
-    }
-    if (missing.length === 0) {
-      await validateSpecPackAudit(worktree, issueBrief, issues);
-    }
+  if (
+    qualityState.requiresAuthorityResearch &&
+    !qualityState.authorityResearchWaived &&
+    qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
+  ) {
+    issues.push(`only ${qualityState.authorityResearchEvidence.length} public authority source URL(s) were researched; at least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} are required`);
   }
 
   if (issues.length > 0) {
@@ -1530,6 +1374,13 @@ function deriveRelatedFilePrefix(targetPath) {
   if (parts.length >= 4 && parts[0] === "agents" && parts[1] === "catalog" && parts[2] === "industry-overlays") {
     return parts.slice(0, 4).join("/");
   }
+  // labor-commons layout: catalog/naics-overlays/{section}/{slug}/spec.yaml.
+  // Return the {section} directory so same-section sibling specialists (the
+  // topically-closest, already-researched neighbors) are treated as related,
+  // rather than the specialist's own (for a new specialist, empty) directory.
+  if (parts.length >= 4 && parts[0] === "catalog" && parts[1] === "naics-overlays") {
+    return parts.slice(0, 3).join("/");
+  }
   if (parts.length > 1) {
     return parts.slice(0, -1).join("/");
   }
@@ -1549,13 +1400,144 @@ function collectSourcePatternFiles(allFiles, targetPath) {
     }
     if (relatedPrefix && file.startsWith(`${relatedPrefix}/`)) {
       related.push(file);
-    } else if (file.startsWith("agents/catalog/industry-overlays/")) {
+    } else if (file.startsWith("agents/catalog/industry-overlays/") || file.startsWith("catalog/naics-overlays/")) {
       broad.push(file);
     }
   }
   const priority = (file) => file.endsWith("evaluation/research-summary.json") ? 0 : 1;
   return [...related.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b)), ...broad.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))]
     .slice(0, limit);
+}
+
+// Find a rich same-section sibling spec.yaml to hand the coder as a concrete
+// depth/structure exemplar. DeepSeek-V3.2 reliably imitates a full example it is
+// given but does not self-generate catalog-depth prose from instructions alone
+// (observed: it hit numeric source/task counts but produced ~350-char
+// specialty_boundary and omitted adjacent_specialties). Picking the LONGEST
+// sibling spec.yaml in the section is a cheap proxy for "the richest example".
+function collectSiblingSpecExemplar(worktree, allFiles, targetPath) {
+  const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
+  const relatedPrefix = deriveRelatedFilePrefix(targetPath);
+  if (!relatedPrefix) {
+    return null;
+  }
+  const candidates = allFiles.filter(
+    (file) =>
+      file.startsWith(`${relatedPrefix}/`) &&
+      /(^|\/)spec\.ya?ml$/.test(file) &&
+      !(targetBase && file.startsWith(`${targetBase}/`))
+  );
+  let best = null;
+  for (const relativePath of candidates) {
+    const filePath = path.join(worktree, relativePath);
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+    const content = fs.readFileSync(filePath, "utf8");
+    if (!best || content.length > best.content.length) {
+      best = { path: relativePath, content };
+    }
+  }
+  if (!best) {
+    return null;
+  }
+  // Only surface the two sections that demonstrate the depth/structure the model
+  // otherwise under-produces: metadata.specialty_boundary (how long/detailed a
+  // boundary should be) and adjacent_specialties (a section it tends to omit).
+  // Injecting the whole file bloats context past the compaction threshold and
+  // makes the coder loop re-reading it, so keep this small and targeted.
+  const boundaryBlock = extractIndentedBlock(best.content, /^\s*specialty_boundary:/m);
+  const adjacentBlock = extractIndentedBlock(best.content, /^adjacent_specialties:/m);
+  // Also surface the FIRST authority_source entry so the model copies the exact
+  // field shape -- especially that the URL lives under `location:` (models drift
+  // to `url:`, which breaks the consumers and defeats the reachability check).
+  const firstSourceBlock = extractFirstListEntryBlock(best.content, /^\s*authority_sources:/m);
+  if (!boundaryBlock && !adjacentBlock && !firstSourceBlock) {
+    return null;
+  }
+  const parts = [`# depth/structure exemplar from ${best.path} (a different lane -- match its depth and field shape, not its content)`];
+  if (boundaryBlock) {
+    parts.push(boundaryBlock.trimEnd());
+  }
+  if (adjacentBlock) {
+    parts.push(adjacentBlock.trimEnd());
+  }
+  if (firstSourceBlock) {
+    parts.push("# authority_sources entry shape (note the URL key is `location:`, not `url:`):");
+    parts.push(firstSourceBlock.trimEnd());
+  }
+  return {
+    path: best.path,
+    content: truncate(parts.join("\n"), Number(env("AE_LOCAL_CODER_EXEMPLAR_CHARS", 4000)))
+  };
+}
+
+// Capture a YAML key line plus every following line more deeply indented than
+// it (its multi-line value or nested list), stopping at the next line whose
+// indentation is <= the key's. Handles both the quoted multi-line
+// specialty_boundary value and the adjacent_specialties list.
+function extractIndentedBlock(content, keyRegex) {
+  const lines = String(content ?? "").split("\n");
+  const startIndex = lines.findIndex((line) => keyRegex.test(line));
+  if (startIndex < 0) {
+    return null;
+  }
+  const keyIndent = lines[startIndex].match(/^\s*/)[0].length;
+  const captured = [lines[startIndex]];
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      captured.push(line);
+      continue;
+    }
+    const indent = line.match(/^\s*/)[0].length;
+    // Continue for deeper-indented lines (a nested/multi-line value) and for
+    // list items at the SAME indent as the key (valid YAML: a sequence whose
+    // "- item" lines align with their parent key, as adjacent_specialties uses).
+    if (indent < keyIndent || (indent === keyIndent && !/^\s*-\s/.test(line))) {
+      break;
+    }
+    captured.push(line);
+  }
+  return captured.join("\n");
+}
+
+// Capture the key line plus just the FIRST list entry beneath it (a "- ..."
+// item and its nested fields), for showing one authority_sources entry's field
+// shape without dumping the whole list.
+function extractFirstListEntryBlock(content, keyRegex) {
+  const lines = String(content ?? "").split("\n");
+  const startIndex = lines.findIndex((line) => keyRegex.test(line));
+  if (startIndex < 0) {
+    return null;
+  }
+  const keyIndent = lines[startIndex].match(/^\s*/)[0].length;
+  const captured = [lines[startIndex]];
+  let entryIndent = null;
+  let sawEntry = false;
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      captured.push(line);
+      continue;
+    }
+    const indent = line.match(/^\s*/)[0].length;
+    if (indent <= keyIndent && !/^\s*-\s/.test(line)) {
+      break;
+    }
+    const isEntryStart = /^\s*-\s/.test(line);
+    if (isEntryStart) {
+      if (sawEntry) {
+        break; // stop at the second entry
+      }
+      sawEntry = true;
+      entryIndent = indent;
+    } else if (sawEntry && indent <= entryIndent) {
+      break;
+    }
+    captured.push(line);
+  }
+  return sawEntry ? captured.join("\n") : null;
 }
 
 function collectAuthoritySourceCandidates(worktree, sourcePatternFiles) {
@@ -1605,7 +1587,8 @@ async function buildInitialContext(worktree, issueBrief = {}) {
     : [];
   const sourcePatternFiles = collectSourcePatternFiles(allFiles, issueBrief.target_path);
   const authoritySourceCandidates = collectAuthoritySourceCandidates(worktree, sourcePatternFiles);
-  const repoGuidance = buildRepoGuidanceContext(worktree, issueBrief);
+  const siblingSpecExemplar = collectSiblingSpecExemplar(worktree, allFiles, issueBrief.target_path);
+  const repoGuidance = buildRepoGuidanceContext(worktree);
   const nonPdfAuthorityCandidates = authoritySourceCandidates
     .map((entry) => entry.url)
     .filter((url) => !/\.pdf(?:$|[?#])/i.test(url))
@@ -1613,17 +1596,22 @@ async function buildInitialContext(worktree, issueBrief = {}) {
 
   return {
     git_status: truncate(status.stdout, 4000),
+    // The real current date, injected directly rather than relying on the model
+    // to run `date`. Observed repeatedly (Qwen3-Coder and DeepSeek-V3.2 alike):
+    // the coder ignores a "run date -u" instruction and writes a plausible-but-
+    // wrong date recalled from training data, producing spec.yaml files whose
+    // stale_after has already passed on the day they're created. Giving it the
+    // date as data removes the dependency on tool-following behavior entirely.
+    current_date_utc: new Date().toISOString().slice(0, 10),
     target_path: issueBrief.target_path ?? null,
-    target_required_files: specPackRequiredPaths(issueBrief.target_path),
-    required_first_steps: isSpecPackIssue(issueBrief)
+    required_first_steps: requiresAuthorityResearch(issueBrief)
       ? [
           sourcePatternFiles.length > 0
             ? `Read or search structured source pattern files before broad URL guessing: ${sourcePatternFiles.slice(0, 4).join(", ")}.`
-            : "Search repository research-summary.json and manifest.yaml files for structured source records before broad URL guessing.",
+            : "Search the repository for existing structured source records before broad URL guessing.",
           nonPdfAuthorityCandidates.length > 0
             ? `Use these repo-derived non-PDF authority candidates first with curl -sSL before trying PDFs: ${nonPdfAuthorityCandidates.join(", ")}.`
-            : "Prefer non-PDF authority pages first; PDF sources are acceptable only when converted to small text snippets, never dumped as raw bytes.",
-          `Write the required package files only under ${issueBrief.target_path}.`
+            : "Prefer non-PDF authority pages first; PDF sources are acceptable only when converted to small text snippets, never dumped as raw bytes."
         ]
       : [],
     files: allFiles.slice(0, Number(env("AE_LOCAL_CODER_FILE_LIST_LIMIT", 10))),
@@ -1634,6 +1622,7 @@ async function buildInitialContext(worktree, issueBrief = {}) {
       ? "If authority source URL commands fail, read or search these repository files to find proven public authority source patterns before trying more URLs. These files are dynamic repo context, not hardcoded sources."
       : "If authority source URL commands fail, search repository research-summary.json and manifest.yaml files for proven public authority source patterns before trying more URLs.",
     authority_source_candidates_from_repo_patterns: authoritySourceCandidates,
+    sibling_spec_exemplar: siblingSpecExemplar,
     repo_quality_contract: repoGuidance,
     total_tracked_files: allFiles.length,
     package_json: truncate(packageJson.stdout, Number(env("AE_LOCAL_CODER_PACKAGE_JSON_CHARS", 300))),
@@ -1654,77 +1643,32 @@ function summarizeInitialContext(initialContext, issueBrief) {
     source_pattern_files: initialContext.source_pattern_files.length,
     authority_source_candidates_from_repo_patterns: initialContext.authority_source_candidates_from_repo_patterns.length,
     repo_guidance_files: initialContext.repo_quality_contract?.reference_files?.length ?? 0,
-    repo_audit_command: initialContext.repo_quality_contract?.audit_command ?? null,
     total_tracked_files: initialContext.total_tracked_files,
     package_json_chars: initialContext.package_json.length,
     readme_chars: initialContext.readme.length
   };
 }
 
-function specPackRequiredPaths(targetPath) {
-  const base = String(targetPath ?? "").replace(/\/+$/, "");
-  if (!base) {
-    return [];
-  }
-  return SPEC_PACK_REQUIRED_FILES.map((file) => `${base}/${file}`);
-}
-
-function parseSpecPackTargetParts(targetPath) {
-  const match = /^agents\/catalog\/industry-overlays\/([^/]+)\/([^/]+)\/?/.exec(String(targetPath ?? ""));
-  if (!match) {
-    return null;
-  }
-  return {
-    industrySlug: match[1],
-    agentSlug: match[2]
-  };
-}
-
-function buildSpecPackAuditCommand(issueBrief) {
-  const parts = parseSpecPackTargetParts(issueBrief.target_path);
-  if (!parts) {
-    return null;
-  }
-  return `node infra/scripts/audit-spec-pack.mjs --industry ${parts.industrySlug} --agent ${parts.agentSlug}`;
-}
-
-function buildRepoGuidanceContext(worktree, issueBrief = {}) {
+// Delivery-contract guidance is entirely repo-dependent (what "complete" output
+// looks like differs per target repo) and must never be hardcoded into this
+// shared engine. The only guidance the coder gets is whatever the target repo
+// itself documents in .github/copilot-instructions.md -- same convention the
+// reviewer role already uses. If a repo has no such file, the coder gets no
+// fabricated format assumptions and works from the issue body alone.
+function buildRepoGuidanceContext(worktree) {
   const existingGuidanceFiles = REPO_GUIDANCE_FILES.filter((file) => fs.existsSync(path.join(worktree, file)));
-  let researchContract = {};
-  const researchContractPath = path.join(worktree, "config/spec-pack-research-contract.json");
-  if (fs.existsSync(researchContractPath)) {
-    try {
-      const body = readJsonFile(researchContractPath);
-      researchContract = {
-        version: body.version ?? null,
-        shared_steps: normalizeArray(body.shared_steps).slice(0, 5),
-        source_quality_rules: normalizeArray(body.source_quality_rules).slice(0, 5),
-        required_summary_fields: normalizeArray(body.required_summary_fields).slice(0, 8)
-      };
-    } catch {
-      researchContract = {};
-    }
-  }
+  const copilotInstructions = readTextIfExists(
+    worktree,
+    ".github/copilot-instructions.md",
+    Number(env("AE_LOCAL_CODER_GUIDANCE_FILE_CHARS", 2000))
+  );
   return {
     source: "target repository Codex/review guidance",
     reference_files: existingGuidanceFiles,
-    copilot_review_instructions: readTextIfExists(
-      worktree,
-      ".github/copilot-instructions.md",
-      Number(env("AE_LOCAL_CODER_GUIDANCE_FILE_CHARS", 600))
-    ),
-    delivery_contract_summary: [
-      "Treat the issue body as source of truth.",
-      "Do not claim validated, deployable, or market-ready unless required artifacts and evidence exist.",
-      "A market-ready spec pack must include constrained research, functionality map, scenarios, results, readiness evidence, release notes, deployment package, and marketing readiness.",
-      "Authoritative sources must be real, appropriate, and documented with authority rationale, refresh cadence, and decay handling.",
-      "Research must identify workflow stages, artifacts, systems of record, decision boundaries, failure modes, and scenario-family coverage.",
-      "Every declared ability must map to passing scenario evidence.",
-      "The named industry must materially change terminology, sources, workflows, risks, records, systems, and escalation behavior."
-    ],
-    required_artifacts: SPEC_PACK_REQUIRED_FILES,
-    research_contract: researchContract,
-    audit_command: buildSpecPackAuditCommand(issueBrief)
+    copilot_review_instructions: copilotInstructions,
+    delivery_contract_summary: copilotInstructions
+      ? ["Treat the issue body as source of truth.", "Follow copilot_review_instructions above for this repo's required output format and completeness bar."]
+      : ["Treat the issue body as source of truth.", "No repo-specific delivery contract is configured; use the smallest complete change that resolves the issue."]
   };
 }
 
@@ -1734,11 +1678,7 @@ function qualityRequirements(issueBrief, qualityState) {
     "When an issue asks for authority sources, perform source research with command actions before writing files. Use public sources retrieved or inspected during the run; do not invent URLs.",
     "Choose authority sources from the issue, repository patterns, and the specialty domain. Prefer primary public authorities and standards bodies over secondary explainers."
   ];
-  if (qualityState.specPack) {
-    requirements.push(`Spec-pack packages must create these files under ${qualityState.targetPath}: ${SPEC_PACK_REQUIRED_FILES.join(", ")}.`);
-    requirements.push("Evaluation output must include at least 10 passing scenarios/test cycles, research-summary must contain a source audit, and readiness/evidence.json must summarize the market-ready claim.");
-    requirements.push("Follow the target repo guidance in .github/copilot-instructions.md, docs/agent-delivery-contract.md, docs/spec-pack-audit-rubric.md, docs/naics-spec-pack-workflow.md, config/spec-pack-research-contract.json, and config/spec-pack-functional-abilities.json when present.");
-  }
+  requirements.push("Follow the target repo's own delivery contract in .github/copilot-instructions.md when present; it defines what a complete, correct submission looks like for this specific repo.");
   if (qualityState.requiresAuthorityResearch) {
     requirements.push(`At least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} government, education, nonprofit, or open-access authority source URLs must be researched through commands before writes under the target package are accepted.`);
     requirements.push("curl or wget research commands must fetch usable source body content; headers-only responses, raw binary/PDF dumps, and ordinary commercial public pages do not count.");
@@ -1751,21 +1691,11 @@ function totalMessageChars(messages) {
 }
 
 function compactRepoQualityContract(contract = {}) {
-  const researchContract = contract.research_contract && typeof contract.research_contract === "object"
-    ? {
-        version: contract.research_contract.version ?? null,
-        shared_steps: normalizeArray(contract.research_contract.shared_steps).slice(0, 3),
-        source_quality_rules: normalizeArray(contract.research_contract.source_quality_rules).slice(0, 3),
-        required_summary_fields: normalizeArray(contract.research_contract.required_summary_fields).slice(0, 6)
-      }
-    : {};
   return {
     source: contract.source ?? null,
     reference_files: normalizeArray(contract.reference_files),
-    delivery_contract_summary: normalizeArray(contract.delivery_contract_summary).slice(0, 5),
-    required_artifacts: normalizeArray(contract.required_artifacts),
-    research_contract: researchContract,
-    audit_command: contract.audit_command ?? null
+    copilot_review_instructions: contract.copilot_review_instructions ?? null,
+    delivery_contract_summary: normalizeArray(contract.delivery_contract_summary).slice(0, 5)
   };
 }
 
@@ -1811,8 +1741,8 @@ function followupInstruction({ observations, status, authorityResearchDone, qual
   if (status) {
     return `Continue if more work is needed. Set done true only when the implementation is complete.${budgetSuffix}`;
   }
-  if (authorityResearchDone && qualityState.specPack) {
-    return `Authority-source research is complete with ${qualityState.authorityResearchEvidence.length} public authority URL(s). Do not run more research-only reads, searches, or source commands. Write the required spec-pack files under ${qualityState.targetPath}.${budgetSuffix}`;
+  if (authorityResearchDone) {
+    return `Authority-source research is complete with ${qualityState.authorityResearchEvidence.length} public authority URL(s). Do not run more research-only reads, searches, or source commands. Write the implementation under ${qualityState.targetPath || "the target path"}.${budgetSuffix}`;
   }
   return `No repository changes are present yet. Continue with new authority-source evidence or write the implementation under ${qualityState.targetPath || "the target path"}.${budgetSuffix}`;
 }
@@ -1840,13 +1770,14 @@ function buildCompactConversationPayload({
 }) {
   return {
     issue_brief: compactIssueBriefForContext(issueBrief),
+    current_date_utc: initialContext.current_date_utc ?? null,
     working_context: {
       target_path: qualityState.targetPath || initialContext.target_path || null,
-      target_required_files: specPackRequiredPaths(qualityState.targetPath || initialContext.target_path),
       related_file_prefix: initialContext.related_file_prefix ?? null,
       source_pattern_files: normalizeArray(initialContext.source_pattern_files).slice(0, 6),
       source_pattern_instruction: initialContext.source_pattern_instruction ?? null,
       authority_source_candidates_from_repo_patterns: normalizeArray(initialContext.authority_source_candidates_from_repo_patterns).slice(0, 4),
+      sibling_spec_exemplar: initialContext.sibling_spec_exemplar ?? null,
       repo_quality_contract: compactRepoQualityContract(initialContext.repo_quality_contract)
     },
     quality_requirements: qualityRequirements(issueBrief, qualityState),
@@ -1862,13 +1793,14 @@ function buildCompactConversationPayload({
 function buildStartupContext(initialContext = {}, issueBrief = {}, qualityState = {}) {
   return {
     git_status: initialContext.git_status,
+    current_date_utc: initialContext.current_date_utc ?? null,
     target_path: qualityState.targetPath || initialContext.target_path || issueBrief.target_path || null,
-    target_required_files: specPackRequiredPaths(qualityState.targetPath || initialContext.target_path || issueBrief.target_path),
     required_first_steps: normalizeArray(initialContext.required_first_steps).slice(0, 3),
     related_file_prefix: initialContext.related_file_prefix ?? null,
     source_pattern_files: normalizeArray(initialContext.source_pattern_files).slice(0, 6),
     source_pattern_instruction: initialContext.source_pattern_instruction ?? null,
     authority_source_candidates_from_repo_patterns: normalizeArray(initialContext.authority_source_candidates_from_repo_patterns).slice(0, 4),
+    sibling_spec_exemplar: initialContext.sibling_spec_exemplar ?? null,
     repo_quality_contract: compactRepoQualityContract(initialContext.repo_quality_contract),
     total_tracked_files: initialContext.total_tracked_files ?? null
   };
@@ -1929,8 +1861,37 @@ function extractSection(text, heading, nextHeadings = []) {
   return afterStart.slice(0, end).trim();
 }
 
+// Derive the spec target_path from an issue's "Queue Agent Slug" using the
+// repo's configured catalog layout. labor-commons issues carry a
+// "::"-delimited slug (e.g. industry-overlays::{section}::{agent}) and no
+// filesystem path, so the old-layout regex below finds nothing and target_path
+// would be null -- which silently disables section-based sibling harvesting.
+function deriveTargetPathFromSlug(prompt) {
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/\/+$/, "");
+  const specFilename = String(env("AE_CATALOG_SPEC_FILENAME", "")).trim();
+  if (!overlayRoot || !specFilename) {
+    return null;
+  }
+  const slug = extractSection(prompt, "Queue Agent Slug", ["Agent Name"]).trim();
+  if (!slug) {
+    return null;
+  }
+  const slugPrefix = String(env("AE_CATALOG_SLUG_PREFIX", "")).trim();
+  let segments = slug.split("::").map((part) => part.trim()).filter(Boolean);
+  if (slugPrefix && segments[0] === slugPrefix) {
+    segments = segments.slice(1);
+  }
+  if (segments.length < 2) {
+    return null;
+  }
+  return `${overlayRoot}/${segments.join("/")}/${specFilename}`;
+}
+
 function buildIssueBrief(prompt) {
-  const targetPath = prompt.match(/agents\/catalog\/industry-overlays\/[^\s`]+/)?.[0] ?? null;
+  const targetPath =
+    prompt.match(/agents\/catalog\/industry-overlays\/[^\s`]+/)?.[0] ??
+    deriveTargetPathFromSlug(prompt) ??
+    null;
   const brief = {
     title: env("AE_ISSUE_TITLE", ""),
     issue_number: env("AE_ISSUE_NUMBER", ""),
@@ -2037,15 +1998,19 @@ Rules:
 - Prefer reading/searching before writing unless the required edit is obvious.
 - For the first response on a new issue, return a small read/search/command action to inspect the repository shape and source requirements; do not try to produce the whole implementation from startup context alone.
 - If authority sources are required, run command actions to retrieve government, education, nonprofit, or open-access authority source URLs before writing package files.
-- If initial_context.authority_source_candidates_from_repo_patterns or working_context.authority_source_candidates_from_repo_patterns is populated, use those dynamic repo-derived URLs before inventing new deep URLs.
+- If initial_context.authority_source_candidates_from_repo_patterns or working_context.authority_source_candidates_from_repo_patterns is populated, build your authority_sources primarily from those URLs: they are drawn from already-researched sibling specialists in the SAME section and are the topically-correct, pre-vetted sources for this lane. Read the sibling research files they came from to understand why each source is authoritative for this domain.
+- A cited source must be topically authoritative for THIS specialist's specific industry and lane, not merely a real URL that returns 200. Never pad authority_sources with unrelated-but-reachable government/standards pages (e.g. consumer-product, retail-refund, or generic warranty pages for a capital-markets specialist). If you cannot find a topically-correct source, cite fewer sources rather than irrelevant ones.
+- Every authority_reason must state specifically why THAT source governs THIS lane. Identical, boilerplate authority_reason text repeated across sources is a defect and will be rejected.
+- Every authority source's URL goes under the key "location" (never "url"). Only cite a location URL that is either (a) taken from the provided repo-derived candidates, or (b) one you have fetched successfully (HTTP 200) with curl during this run. Do NOT write a plausible-looking URL from memory that you have not confirmed -- a fabricated or dead link (HTTP 404) fails validation. Prefer citing a stable top-level authority page you can verify over guessing a deep path.
 - Keep command output small. Prefer targeted source snippets, titles, standards sections, or repository searches over dumping full web pages, PDFs, archives, or full large files.
 - If a command fails, do not repeat the same command. Correct the syntax or choose a different command.
-- If multiple source URLs fail, stop inventing deep URLs. Search or read related repository research summaries/manifests under the same industry prefix to find proven authority URL patterns, then fetch those authority sources.
+- If multiple source URLs fail, stop inventing deep URLs. Search or read related repository files near the target path to find proven authority URL patterns, then fetch those authority sources.
 - Do not use echo or printf as research. Research commands must inspect authority source URLs or repository evidence.
 - Use curl -sSL for source checks. Headers-only requests, empty responses, raw binary/PDF dumps, and ordinary commercial public pages are not evidence.
-- For spec-pack issues, write only under the target_path from the user context unless explicitly asked to modify shared config.
+- Write only under the target_path from the user context unless explicitly asked to modify shared config.
+- If initial_context.sibling_spec_exemplar or working_context.sibling_spec_exemplar is present, it is a real, currently-accepted spec from the SAME section. Match its depth and structure: your specialty_boundary must be as long and concretely detailed as the exemplar's (do not truncate to a sentence or two), and you must include every structural section the exemplar has, including adjacent_specialties. Do not copy its content -- your specialist is a different lane -- but do copy its level of specificity and completeness.
+- For any date field (created_at, last_updated_at, last_reviewed, stale_after, source_baseline_version, next_review_due_at, etc.), use current_date_utc from the context as "today" and compute other dates relative to it. Do not invent a date or reuse one recalled from training data; a stale_after that has already passed on the creation date is a defect.
 - Never use placeholders, example.com, generic "Scenario 1" style labels, TODO/TBD text, or invented authority sources.
-- If initial_context.repo_quality_contract.audit_command or working_context.repo_quality_contract.audit_command is present, produce files that can pass that audit command.
 - When writing a file, provide the complete desired content for that file.
 - Keep changes focused on the issue.
 - Do not edit .git internals.
@@ -2128,6 +2093,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
     DEFAULT_FORCE_WRITE_ITERATIONS_REMAINING
   ));
   let consecutiveNoProgressTurns = 0;
+  let forcedFinalWriteAttempted = false;
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     process.stderr.write(`Lane coder iteration ${iteration}\n`);
     const response = await chatWithRetry(chat);
@@ -2191,6 +2157,29 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
     consecutiveNoProgressTurns = madeProgress ? 0 : consecutiveNoProgressTurns + 1;
 
     if (consecutiveNoProgressTurns >= maxNoProgressTurns) {
+      // Before giving up, if nothing has been written to the worktree yet, spend
+      // one final turn forcing a write with whatever context is already gathered.
+      // The common failure otherwise is a run that researches (and gets research
+      // commands rejected) until it trips this counter, producing NOTHING --
+      // strictly worse than a spec written from the exemplar + sources already in
+      // context. Only escalate to a hard stop if that forced write also fails.
+      if (!status && !forcedFinalWriteAttempted) {
+        forcedFinalWriteAttempted = true;
+        consecutiveNoProgressTurns = 0;
+        noOpActionFingerprints.clear();
+        const targetPathForWrite = qualityState.targetPath || initialContext.target_path || issueBrief.target_path || "the target path";
+        messages.push({
+          role: "user",
+          content: JSON.stringify({
+            forced_final_write: true,
+            instruction:
+              `You are out of research turns and have written nothing. Stop all reads, searches, and commands. In THIS turn, return a write_files action that writes the complete file at ${targetPathForWrite}. ` +
+              "Match the sibling_spec_exemplar's depth and structure (full specialty_boundary and adjacent_specialties), use the authority sources already gathered, and use current_date_utc for date fields. A complete file written now is required; partial sourcing is acceptable."
+          })
+        });
+        process.stdout.write(`\n[lane-coder forced-final-write]\n${JSON.stringify({ target_path: targetPathForWrite }, null, 2)}\n`);
+        continue;
+      }
       const noProgressSummary = {
         consecutive_no_progress_turns: consecutiveNoProgressTurns,
         max_no_progress_turns: maxNoProgressTurns,

@@ -1238,6 +1238,12 @@ function buildLocalLaneEnv(config, stateDir, baseEnv, launch, item, issue, workt
     AE_ISSUE_TITLE: issue.title ?? "",
     AE_BRANCH_NAME: item.branch,
     AE_PR_BASE_BRANCH: config.branches.pr_base_branch,
+    // Repo-specific catalog layout, used to derive a spec.yaml target_path from
+    // an issue's Queue Agent Slug when the issue body carries no filesystem
+    // path. Empty for repos that don't use a catalog-overlay layout.
+    AE_CATALOG_OVERLAY_ROOT: String(config.repo.catalog?.overlay_root ?? ""),
+    AE_CATALOG_SPEC_FILENAME: String(config.repo.catalog?.spec_filename ?? ""),
+    AE_CATALOG_SLUG_PREFIX: String(config.repo.catalog?.slug_prefix ?? ""),
     AE_ISSUE_PROMPT_PATH: promptPath,
     AE_REMEDIATION_PAYLOAD_PATH: remediationPayloadPath ?? "",
     AE_LOCAL_MODEL_SERVICE: launch.runtimeService ?? "",
@@ -1758,13 +1764,21 @@ function runValidatorRole(config, stateDir) {
     try {
       for (const command of config.validation.bootstrap_commands ?? []) {
         const stepLog = `${runLog}.${safeSlug(command)}.tmp`;
-        const output = runCommandToFile(command, { cwd, logPath: stepLog });
+        const output = runCommandToFile(command, {
+          cwd,
+          logPath: stepLog,
+          env: { AE_PR_BASE_BRANCH: config.branches.pr_base_branch }
+        });
         fs.appendFileSync(runLog, `${command}\n${output}\n\n`);
         fs.rmSync(stepLog, { force: true });
       }
       for (const command of config.validation.commands) {
         const stepLog = `${runLog}.${safeSlug(command)}.tmp`;
-        const output = runCommandToFile(command, { cwd, logPath: stepLog });
+        const output = runCommandToFile(command, {
+          cwd,
+          logPath: stepLog,
+          env: { AE_PR_BASE_BRANCH: config.branches.pr_base_branch }
+        });
         fs.appendFileSync(runLog, `${command}\n${output}\n\n`);
         fs.rmSync(stepLog, { force: true });
       }
@@ -1854,6 +1868,22 @@ function buildReviewerPrompt(config) {
   return fs.readFileSync(config.reviewer.instructions_path, "utf8");
 }
 
+// The reviewer's prose used to be purely advisory: whatever it wrote got
+// posted as a comment, but the PR's tracked result was "success" as soon as
+// the model call completed, regardless of what the review said -- a
+// "don't merge this" comment never actually blocked a merge. Requiring a
+// machine-parseable verdict line closes that gap; see the schema-conformance
+// incident this was written to fix.
+const REVIEWER_VERDICT_INSTRUCTION =
+  'End your review with exactly one line of the form "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES" (uppercase, no other text on that line). Use REQUEST_CHANGES if there are any actionable bugs, regressions, missing required elements, or schema/format violations. Use APPROVE only if there are none.';
+
+function parseReviewerVerdict(output) {
+  const match = /VERDICT:\s*(APPROVE|REQUEST_CHANGES)\b/i.exec(String(output ?? ""));
+  // Fail closed: an unparseable or missing verdict is treated the same as
+  // REQUEST_CHANGES, not as a silent pass.
+  return match ? match[1].toUpperCase() : "REQUEST_CHANGES";
+}
+
 function extractReviewerOutput(result) {
   const stdout = String(result.stdout ?? "").trim();
   if (stdout) {
@@ -1932,7 +1962,8 @@ function runReviewerCodexExecAsync({ worktree, baseBranch, model, reasoningEffor
     "Output requirements:",
     "- Return concise markdown suitable for a GitHub pull request comment.",
     "- Prioritize actionable bugs, regressions, risky assumptions, and missing tests.",
-    "- If there are no actionable findings, say so explicitly."
+    "- If there are no actionable findings, say so explicitly.",
+    `- ${REVIEWER_VERDICT_INSTRUCTION}`
   ].join("\n\n");
 
   const args = [
@@ -2009,11 +2040,16 @@ async function runReviewerOpenAiCompatibleAsync({ worktree, baseBranch, model, r
 
   const prompt = [
     `Review the current branch against origin/${baseBranch}.`,
+    `Today's actual date is ${new Date().toISOString().slice(0, 10)} (UTC). Use this as "today" for any date reasoning. Do NOT rely on your own notion of the current date, and do NOT flag a date that is today or earlier as a "future date" error.`,
     reviewPrompt.trim(),
+    "Scope of your review:",
+    "- Schema shape, required fields, field placement, date-field validity, URL reachability, and every COUNT/LENGTH THRESHOLD (minimum number of authority sources, minimum boundary length, etc.) are ALREADY checked mechanically and authoritatively by the repo's own validation script. Do NOT report any of these -- you cannot see that script's result and you will produce false positives. Never claim a field/section is \"extraneous\" or \"not in the schema\" (the contract shape is a minimum, not exhaustive), and never flag that there are \"too few\" sources or that something is \"below the required minimum\" -- counts are the validator's job, not yours.",
+    "- Review ONLY semantic content quality that a mechanical check cannot judge: is the specialty_boundary genuinely specific to this exact industry and lane (not generic); are the authority sources that ARE cited topically appropriate and real for this lane; is anything stated factually wrong or internally contradictory; is the scope coherent. Judge the QUALITY of what is present, never the QUANTITY.",
     "Output requirements:",
     "- Return concise markdown suitable for a GitHub pull request comment.",
-    "- Prioritize actionable bugs, regressions, risky assumptions, and missing tests.",
+    "- Only REQUEST_CHANGES for a genuine semantic-content problem of the kind above. If the content is topically sound, APPROVE even if you would have written it differently.",
     "- If there are no actionable findings, say so explicitly.",
+    `- ${REVIEWER_VERDICT_INSTRUCTION}`,
     "",
     "Diff to review:",
     "```diff",
@@ -2256,6 +2292,14 @@ async function runReviewerRole(config, stateDir) {
               "reviewer",
               `pr #${pr.number} review output generated but posting failed: ${error.message}`
             );
+          }
+
+          const verdict = parseReviewerVerdict(output);
+          if (verdict === "REQUEST_CHANGES") {
+            const firstLine = output.split("\n").map((line) => line.trim()).find(Boolean) ?? "reviewer requested changes";
+            const error = new Error(`reviewer requested changes: ${firstLine}`);
+            error.output = output;
+            throw error;
           }
 
           const record = createServicePrRecord({

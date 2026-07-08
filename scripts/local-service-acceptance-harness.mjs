@@ -627,7 +627,7 @@ function updatePullRef(prNumber, sha) {
 }
 
 if (prompt.includes("Review the current branch against origin/")) {
-  process.stdout.write("No actionable findings.\\n");
+  process.stdout.write("No actionable findings.\\nVERDICT: APPROVE\\n");
   process.exit(0);
 }
 
