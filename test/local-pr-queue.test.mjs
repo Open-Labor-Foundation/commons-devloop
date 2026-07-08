@@ -98,7 +98,7 @@ process.stdout.write("[]");
   writeFile(
     path.join(binDir, "codex"),
     `#!/usr/bin/env node
-process.stdout.write("No actionable findings.\\n");
+process.stdout.write("No actionable findings.\\nVERDICT: APPROVE\\n");
 `,
     0o755
   );

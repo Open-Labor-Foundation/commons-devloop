@@ -1001,47 +1001,41 @@ Use public authoritative source research.
   });
 
   try {
-    await assert.rejects(
-      () => runRunner({
-        baseUrl,
-        prompt,
-        setupWorktree: (worktree) => {
-          const summaryPath = path.join(
-            worktree,
-            "agents/catalog/industry-overlays/information-software-and-digital-media/adjacent-agent/evaluation/research-summary.json"
-          );
-          fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
-          fs.writeFileSync(summaryPath, JSON.stringify({
-            authoritative_sources: [
-              { url: "https://www.nist.gov/source-one", title: "One", publisher: "NIST", authority_rationale: "public authority" },
-              { url: "https://csrc.nist.gov/source-two", title: "Two", publisher: "NIST CSRC", authority_rationale: "public authority" },
-              { url: "https://www.cisa.gov/source-three", title: "Three", publisher: "CISA", authority_rationale: "public authority" },
-              { url: "https://www.ecfr.gov/source-four", title: "Four", publisher: "eCFR", authority_rationale: "public authority" },
-              { url: "https://www.w3.org/source-five", title: "Five", publisher: "W3C", authority_rationale: "open standard" },
-              { url: "https://owasp.org/source-six", title: "Six", publisher: "OWASP", authority_rationale: "open framework" }
-            ]
-          }, null, 2));
-          execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
-          execFileSync("git", ["commit", "-m", "add structured authority evidence"], {
-            cwd: worktree,
-            stdio: "ignore",
-            env: {
-              ...process.env,
-              GIT_AUTHOR_NAME: "Test",
-              GIT_AUTHOR_EMAIL: "test@example.com",
-              GIT_COMMITTER_NAME: "Test",
-              GIT_COMMITTER_EMAIL: "test@example.com"
-            }
-          });
-        }
-      }),
-      (error) => {
-        assert.match(error.stdout, /"type": "write_file"/);
-        assert.doesNotMatch(error.stdout, /authority-source research has not been performed/);
-        assert.match(error.stderr, /Lane coder quality gate failed/);
-        return true;
+    const result = await runRunner({
+      baseUrl,
+      prompt,
+      setupWorktree: (worktree) => {
+        const summaryPath = path.join(
+          worktree,
+          "agents/catalog/industry-overlays/information-software-and-digital-media/adjacent-agent/evaluation/research-summary.json"
+        );
+        fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
+        fs.writeFileSync(summaryPath, JSON.stringify({
+          authoritative_sources: [
+            { url: "https://www.nist.gov/source-one", title: "One", publisher: "NIST", authority_rationale: "public authority" },
+            { url: "https://csrc.nist.gov/source-two", title: "Two", publisher: "NIST CSRC", authority_rationale: "public authority" },
+            { url: "https://www.cisa.gov/source-three", title: "Three", publisher: "CISA", authority_rationale: "public authority" },
+            { url: "https://www.ecfr.gov/source-four", title: "Four", publisher: "eCFR", authority_rationale: "public authority" },
+            { url: "https://www.w3.org/source-five", title: "Five", publisher: "W3C", authority_rationale: "open standard" },
+            { url: "https://owasp.org/source-six", title: "Six", publisher: "OWASP", authority_rationale: "open framework" }
+          ]
+        }, null, 2));
+        execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+        execFileSync("git", ["commit", "-m", "add structured authority evidence"], {
+          cwd: worktree,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test",
+            GIT_AUTHOR_EMAIL: "test@example.com",
+            GIT_COMMITTER_NAME: "Test",
+            GIT_COMMITTER_EMAIL: "test@example.com"
+          }
+        });
       }
-    );
+    });
+    assert.match(result.stdout, /"type": "write_file"/);
+    assert.doesNotMatch(result.stdout, /authority-source research has not been performed/);
   } finally {
     server.close();
   }
@@ -1319,27 +1313,20 @@ Use public authoritative source research.
   });
 
   try {
-    // The run still fails overall -- the model only wrote one filler file,
-    // not the full required spec-pack set, and that check is a separate,
-    // legitimate gate this fix does NOT waive. What's under test is that the
-    // *authority-source* complaint specifically never appears, proving only
-    // that gate got waived once the budget ran low.
-    await assert.rejects(
-      () => runRunner({
-        baseUrl,
-        prompt,
-        env: {
-          AE_LOCAL_CODER_MAX_ITERATIONS: "3",
-          AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING: "2"
-        }
-      }),
-      (error) => {
-        assert.match(error.stderr, /Lane coder quality gate failed/);
-        assert.doesNotMatch(error.stderr, /public authority source URL\(s\) were researched/);
-        assert.match(error.stderr, /missing required files/);
-        return true;
+    // The run succeeds overall -- there is no repo-agnostic "required file
+    // set" gate anymore (that guidance is entirely repo-dependent and lives
+    // in the target repo's own .github/copilot-instructions.md, not this
+    // engine). What's under test is that the *authority-source* complaint
+    // specifically never appears, proving that gate got waived once the
+    // budget ran low.
+    await runRunner({
+      baseUrl,
+      prompt,
+      env: {
+        AE_LOCAL_CODER_MAX_ITERATIONS: "3",
+        AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING: "2"
       }
-    );
+    });
 
     // With AE_LOCAL_CODER_MAX_ITERATIONS=3 and
     // AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING=2, only 2 iterations
@@ -1617,11 +1604,11 @@ agents/catalog/industry-overlays/information-software-and-digital-media/software
     const startupUserMessage = chatRequest.body.messages.find((message) => message.role === "user");
     const startupPayload = JSON.parse(startupUserMessage.content);
     const startupText = JSON.stringify(startupPayload);
-    assert.deepEqual(startupPayload.initial_context.required_first_steps, [
-      "Search repository research-summary.json and manifest.yaml files for structured source records before broad URL guessing.",
-      "Prefer non-PDF authority pages first; PDF sources are acceptable only when converted to small text snippets, never dumped as raw bytes.",
-      "Write the required package files only under agents/catalog/industry-overlays/information-software-and-digital-media/software-business-operations-specialist/."
-    ]);
+    // This prompt has no "Authority Sources" section, so no authority-research
+    // first-steps guidance applies -- required_first_steps is empty. What
+    // this repo-agnostic engine must never do is fabricate a required-files
+    // list or instance-specific "sibling example" guidance for any repo.
+    assert.deepEqual(startupPayload.initial_context.required_first_steps, []);
     assert.equal(Object.hasOwn(startupPayload.initial_context, "existing_example_artifact_files"), false);
     assert.equal(Object.hasOwn(startupPayload.initial_context, "candidate_authority_sources_from_existing_packs"), false);
     assert.doesNotMatch(startupText, /read (exactly )?one existing spec-pack/i);
