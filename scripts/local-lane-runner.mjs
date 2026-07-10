@@ -1660,7 +1660,7 @@ function buildRepoGuidanceContext(worktree) {
   const copilotInstructions = readTextIfExists(
     worktree,
     ".github/copilot-instructions.md",
-    Number(env("AE_LOCAL_CODER_GUIDANCE_FILE_CHARS", 2000))
+    Number(env("AE_LOCAL_CODER_GUIDANCE_FILE_CHARS", 8000))
   );
   return {
     source: "target repository Codex/review guidance",
@@ -1748,15 +1748,19 @@ function followupInstruction({ observations, status, authorityResearchDone, qual
 }
 
 function compactIssueBriefForContext(issueBrief = {}) {
+  const compactChars = Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 1200));
   return {
     title: issueBrief.title ?? "",
     issue_number: issueBrief.issue_number ?? "",
     target_path: issueBrief.target_path ?? null,
-    requested_change: truncate(issueBrief.requested_change ?? "", Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 450))),
-    authority_sources: truncate(issueBrief.authority_sources ?? "", Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 450))),
-    acceptance_criteria: truncate(issueBrief.acceptance_criteria ?? "", Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 450))),
-    materialization_expectations: truncate(issueBrief.materialization_expectations ?? "", Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 450))),
-    deployment_expectations: truncate(issueBrief.deployment_expectations ?? "", Number(env("AE_LOCAL_CODER_COMPACT_BRIEF_FIELD_CHARS", 450)))
+    specialty_boundary: truncate(issueBrief.specialty_boundary ?? "", compactChars),
+    constrained_research_contract: truncate(issueBrief.constrained_research_contract ?? "", compactChars),
+    operational_build_brief: truncate(issueBrief.operational_build_brief ?? "", compactChars),
+    requested_change: truncate(issueBrief.requested_change ?? "", compactChars),
+    authority_sources: truncate(issueBrief.authority_sources ?? "", compactChars),
+    evaluation_expectations: truncate(issueBrief.evaluation_expectations ?? "", compactChars),
+    acceptance_criteria: truncate(issueBrief.acceptance_criteria ?? "", compactChars),
+    materialization_expectations: truncate(issueBrief.materialization_expectations ?? "", compactChars)
   };
 }
 
@@ -1896,18 +1900,21 @@ function buildIssueBrief(prompt) {
     title: env("AE_ISSUE_TITLE", ""),
     issue_number: env("AE_ISSUE_NUMBER", ""),
     target_path: targetPath,
+    specialty_boundary: extractSection(prompt, "Specialty Boundary", ["Semantic Definition Profile"]),
+    constrained_research_contract: extractSection(prompt, "Constrained Research Contract", ["Operational Build Brief"]),
+    operational_build_brief: extractSection(prompt, "Operational Build Brief", ["Required Semantic Inclusions"]),
     requested_change: extractSection(prompt, "Requested Change", ["Authority Sources"]),
     authority_sources: extractSection(prompt, "Authority Sources", ["Evaluation And Accuracy Expectations"]),
+    evaluation_expectations: extractSection(prompt, "Evaluation And Accuracy Expectations", ["Materialization Expectations"]),
     acceptance_criteria: extractSection(prompt, "Acceptance Criteria", ["Risks And Unknowns"]),
-    materialization_expectations: extractSection(prompt, "Materialization Expectations", ["Deployment And Market Expectations"]),
-    deployment_expectations: extractSection(prompt, "Deployment And Market Expectations", ["Acceptance Criteria"]),
+    materialization_expectations: extractSection(prompt, "Materialization Expectations", ["Acceptance Criteria"]),
     execution_requirements: extractSection(prompt, "Execution requirements", ["Operating constraints"]),
     operating_constraints: extractSection(prompt, "Operating constraints", []),
     full_prompt_chars: prompt.length
   };
   return JSON.parse(JSON.stringify(brief, (key, value) => {
     if (typeof value === "string") {
-      return truncate(value, Number(env("AE_LOCAL_CODER_BRIEF_FIELD_CHARS", 700)));
+      return truncate(value, Number(env("AE_LOCAL_CODER_BRIEF_FIELD_CHARS", 2000)));
     }
     return value;
   }));
