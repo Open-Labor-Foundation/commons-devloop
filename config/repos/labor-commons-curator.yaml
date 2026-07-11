@@ -1,0 +1,156 @@
+version: 2
+
+repo:
+  key: labor-commons-curator
+  github_slug: Open-Labor-Foundation/labor-commons-curator
+  default_branch: main
+
+lifecycle:
+  enabled: true
+  target_mode: milestone
+  target_name: v1
+  pause_when_target_complete: true
+  pause_when_budget_exhausted: true
+  max_parallel_prs: 1
+  max_runs_per_day: 8
+
+issue_source:
+  labels:
+    - codex-ready
+
+dispatcher:
+  enabled: true
+  poll_interval_seconds: 30
+  primary_max_workers: 1
+  secondary_max_workers: 0
+  local_max_workers: 0
+
+# Featherless is this org's documented cost-efficient default (see
+# labor-commons's config for the model this engine already runs reliably
+# against). No code-generation-quality data exists yet for this repo
+# specifically -- revisit model choice once real PRs come back and can be
+# judged, the same way labor-commons's model was picked after observing
+# defect patterns, not chosen upfront.
+models:
+  dispatcher:
+    primary:
+      provider: openai_compatible
+      name: zai-org/GLM-5.2
+      reasoning_effort: high
+      runtime_endpoint: https://api.featherless.ai/v1
+      api_key_env: FEATHERLESS_API_KEY
+      pause_threshold_used_percent: 90
+      weekly_pause_threshold_used_percent: 90
+      reserve_burn_window_minutes: 300
+      nominal_burn_per_lane_hour: 3
+    local:
+      enabled: false
+      name: qwen2.5-coder:7b
+      reasoning_effort: local
+      max_workers: 0
+      runtime_service: local-model
+      runtime_endpoint: http://local-model:11434/v1
+      runtime_health_url: http://local-model:11434/api/tags
+      runtime_image: ollama/ollama:latest
+      local_provider: ollama
+      auto_pull: false
+  reviewer:
+    provider: openai_compatible
+    name: zai-org/GLM-5.2
+    reasoning_effort: medium
+    runtime_endpoint: https://api.featherless.ai/v1
+    api_key_env: FEATHERLESS_REVIEWER_API_KEY
+
+validation:
+  enabled: true
+  context: validate
+  poll_interval_seconds: 30
+  max_concurrent: 1
+  # No test suite exists yet -- the repo currently holds only the design
+  # spec bundle under docs/. Deliberately a no-op rather than a command
+  # that fails on an empty repo; the first real issue in the backlog
+  # should add real test tooling, at which point this needs to change to
+  # actually run it (see labor-commons-curator/docs/roadmap.md and the
+  # planning discussion about issue-quality: a repo with zero tests means
+  # nothing here gates code quality yet).
+  commands:
+    - echo "no test suite yet -- validation is a placeholder, see config comment"
+  post_status: false
+
+reviewer:
+  enabled: true
+  poll_interval_seconds: 60
+  max_concurrent: 1
+  post_mode: comment
+
+runner_manager:
+  enabled: true
+  required_labels:
+    - self-hosted
+    - linux
+    - labor-commons-curator
+  runner_labels:
+    - self-hosted
+    - linux
+    - labor-commons-curator
+  image_name: commons-devloop/gh-runner:latest
+  container_prefix: labor-commons-curator-gh-runner
+  max_runners: 2
+  poll_interval_seconds: 20
+  launch_cooldown_seconds: 180
+  mount_docker_socket: true
+  mount_workspace: false
+  dry_run: true
+
+pr_manager:
+  # Human-gated, matching labor-commons's posture, not baremind's
+  # auto-merge -- this pipeline has no track record yet on this repo.
+  enabled: false
+  interval_seconds: 30
+  merge_concurrency: 1
+  auto_merge_label:
+  auto_close_superseded_conflicts: false
+
+monitor:
+  enabled: true
+  poll_interval_seconds: 30
+
+safety:
+  pr_only: true
+  auto_merge: false
+  protected_branches:
+    - main
+  protected_paths: []
+  allow_force_push: false
+  require_clean_worktree_before_run: true
+
+budgets:
+  max_estimated_credits_per_day: 100
+  pause_reason_on_budget: daily credit budget reached
+
+branches:
+  work_branch_prefix: autonomous/
+  pr_base_branch: main
+
+roles:
+  enabled:
+    autonomous: true
+    dispatcher: true
+    validator: true
+    reviewer: true
+    runner-manager: true
+    pr-manager: true
+    monitor: true
+    dashboard: true
+
+dashboard:
+  enabled: true
+  port: 4705
+  expose_issue_details: true
+  expose_pr_links: true
+
+retention:
+  enabled: true
+  worktree_max_age_hours: 2
+  run_log_max_age_days: 2
+  output_max_age_days: 2
