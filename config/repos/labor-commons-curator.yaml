@@ -7,8 +7,15 @@ repo:
 
 lifecycle:
   enabled: true
-  target_mode: milestone
-  target_name: v1
+  # milestone mode requires issue.milestone.title to exactly match
+  # target_name -- no "v1" milestone exists yet and issue #1 isn't
+  # assigned to one, so milestone mode silently matched nothing and the
+  # dispatcher paused itself thinking the (nonexistent) target was
+  # complete. open mode just uses issue_source.labels (codex-ready)
+  # instead, matching labor-commons's own working config. Revisit once a
+  # real v1 milestone/backlog is actually defined.
+  target_mode: open
+  target_name: all-open-codex-ready-issues
   pause_when_target_complete: true
   pause_when_budget_exhausted: true
   max_parallel_prs: 1
