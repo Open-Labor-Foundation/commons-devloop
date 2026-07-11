@@ -21,10 +21,13 @@ x-engine-service: &engine-service
     CODEX_HOME: "/engine/.codex"
     GH_CONFIG_DIR: "/root/.config/gh"
   volumes:
-    - .:/engine
+    # No .:/engine bind mount — Docker context is remote (jkm-remote), so the
+    # host path doesn't exist on the remote host. Code is baked into the image
+    # via COPY . /engine in services/Dockerfile. Rebuild the image to pick up
+    # code changes (docker compose build engine-image).
     - engine-node-modules:/engine/node_modules
+    - engine-state:/engine/state
     - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
-    - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
     - codex-home:/engine/.codex
     - gh-config:/root/.config/gh
 
@@ -63,10 +66,9 @@ services:
     <<: *engine-service
     command: ["node", "scripts/engine-role.mjs", "--role", "runner-manager"]
     volumes:
-      - .:/engine
       - engine-node-modules:/engine/node_modules
+      - engine-state:/engine/state
       - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
-      - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
       - codex-home:/engine/.codex
       - gh-config:/root/.config/gh
       # Runner-manager needs write access for container launch/cleanup and registration workflows.
@@ -84,14 +86,12 @@ services:
     <<: *engine-service
     command: ["node", "scripts/dashboard-server.mjs"]
     volumes:
-      - .:/engine
       - engine-node-modules:/engine/node_modules
+      - engine-state:/engine/state
       # Keeps the image-built frontend (services/Dockerfile's dashboard-build
-      # stage) available despite the whole-repo bind mount above, the same
-      # way engine-node-modules survives it.
+      # stage) available, the same way engine-node_modules survives it.
       - dashboard-dist:/engine/dashboard/dist
       - ${AE_TARGET_REPO_PATH:?set AE_TARGET_REPO_PATH}:/workspace/target-repo
-      - ${AE_REPO_CONFIG_HOST_PATH:-/dev/null}:/engine/config/repo.yaml:ro
       - codex-home:/engine/.codex
       - gh-config:/root/.config/gh
       # Dashboard reads container status and host CPU/disk metrics; mount docker socket read-only.
@@ -118,6 +118,7 @@ services:
 
 volumes:
   engine-node-modules:
+  engine-state:
   dashboard-dist:
   codex-home:
   gh-config:
