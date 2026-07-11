@@ -25,18 +25,20 @@ dispatcher:
   secondary_max_workers: 0
   local_max_workers: 0
 
-# Featherless is this org's documented cost-efficient default (see
-# labor-commons's config for the model this engine already runs reliably
-# against). No code-generation-quality data exists yet for this repo
-# specifically -- revisit model choice once real PRs come back and can be
-# judged, the same way labor-commons's model was picked after observing
-# defect patterns, not chosen upfront.
+# Featherless is this org's documented cost-efficient default. GLM-5.2 at
+# high effort (labor-commons's choice) was tuned for spec-CONTENT generation
+# defects (fabricated URLs, bad slugs) -- a different problem from general
+# coding, and not a reason to pay for that cost profile here. Qwen3 at medium
+# effort: a solid general coder, already validated for tool-calling on this
+# org's Featherless MAX tier. Revisit once real PRs come back and can be
+# judged, same as labor-commons's model was picked after observing defects,
+# not chosen upfront.
 models:
   dispatcher:
     primary:
       provider: openai_compatible
-      name: zai-org/GLM-5.2
-      reasoning_effort: high
+      name: Qwen/Qwen3-32B
+      reasoning_effort: medium
       runtime_endpoint: https://api.featherless.ai/v1
       api_key_env: FEATHERLESS_API_KEY
       pause_threshold_used_percent: 90
@@ -56,7 +58,7 @@ models:
       auto_pull: false
   reviewer:
     provider: openai_compatible
-    name: zai-org/GLM-5.2
+    name: Qwen/Qwen3-32B
     reasoning_effort: medium
     runtime_endpoint: https://api.featherless.ai/v1
     api_key_env: FEATHERLESS_REVIEWER_API_KEY
