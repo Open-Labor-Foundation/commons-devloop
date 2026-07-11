@@ -666,7 +666,7 @@ async function searchObservation(worktree, entry) {
 }
 
 function qualityProgress(qualityState) {
-  const requiredAuthoritySources = Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
+  const requiredAuthoritySources = Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6));
   const hasBlockedCommands = normalizeArray(qualityState.failedCommands).length > 0;
   const authorityResearchOutstanding = qualityState.requiresAuthorityResearch &&
     !qualityState.authorityResearchWaived &&
@@ -729,7 +729,19 @@ function openAuthoritySourceUrl(url) {
   }
 }
 
+// Fully opt-in via AE_AUTHORITY_RESEARCH_KEYWORDS (comma-separated, set from
+// this repo's own quality_gates.authority_research.trigger_keywords config --
+// see config.mjs). Empty (the default for every repo) means this never
+// triggers; the engine itself has no built-in notion of what "authority
+// research" means for any given repo.
 function requiresAuthorityResearch(issueBrief = {}) {
+  const keywords = String(env("AE_AUTHORITY_RESEARCH_KEYWORDS", ""))
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean);
+  if (keywords.length === 0) {
+    return false;
+  }
   const text = [
     issueBrief.requested_change,
     issueBrief.authority_sources,
@@ -737,7 +749,8 @@ function requiresAuthorityResearch(issueBrief = {}) {
     issueBrief.materialization_expectations,
     issueBrief.deployment_expectations
   ].join("\n").toLowerCase();
-  return /authority|authoritative|source|research|owasp|cfr|nist|cisa/.test(text);
+  const pattern = new RegExp(keywords.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "i");
+  return pattern.test(text);
 }
 
 function recordAuthorityResearchEvidence(qualityState, observation) {
@@ -885,7 +898,7 @@ function assessContentQuality(relativePath, content, qualityState = {}) {
     qualityState.requiresAuthorityResearch &&
     !qualityState.authorityResearchWaived &&
     String(relativePath ?? "").startsWith(String(qualityState.targetPath ?? "")) &&
-    qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
+    qualityState.authorityResearchEvidence.length < Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6))
   ) {
     issues.push("authority-source research has not been performed with public authority sources before writing");
   }
@@ -931,9 +944,9 @@ async function validateLocalCoderQuality(worktree, issueBrief, qualityState) {
   if (
     qualityState.requiresAuthorityResearch &&
     !qualityState.authorityResearchWaived &&
-    qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))
+    qualityState.authorityResearchEvidence.length < Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6))
   ) {
-    issues.push(`only ${qualityState.authorityResearchEvidence.length} public authority source URL(s) were researched; at least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} are required`);
+    issues.push(`only ${qualityState.authorityResearchEvidence.length} public authority source URL(s) were researched; at least ${Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6))} are required`);
   }
 
   if (issues.length > 0) {
@@ -1146,7 +1159,7 @@ async function executeAction(worktree, action, qualityState = {}) {
   // guardrail — despite failedCommands already crossing the threshold —
   // never actually fired. Gate purely on the failure count instead.
   const sourceDiscoveryRequired = qualityState.requiresAuthorityResearch &&
-    qualityState.authorityResearchEvidence.length < Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6)) &&
+    qualityState.authorityResearchEvidence.length < Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6)) &&
     normalizeArray(qualityState.failedCommands).length >= Number(env("AE_LOCAL_CODER_SOURCE_PATTERN_AFTER_FAILURES", 2));
 
   for (const entry of commands.slice(0, 6)) {
@@ -1366,20 +1379,25 @@ async function requireCommandSuccess(command, args, options = {}) {
   return result;
 }
 
+// Opt-in via this repo's own repo.catalog.overlay_root config (see
+// config.mjs / AE_CATALOG_OVERLAY_ROOT). The directory one level below the
+// configured root (e.g. the "section" in {overlay_root}/{section}/{slug}/
+// {spec_filename}) is treated as "related" -- same-section siblings are the
+// topically closest neighbors, rather than the target's own (for a new
+// entry, empty) directory. Repos with no catalog.overlay_root configured
+// fall straight through to the generic parent-directory behavior below.
 function deriveRelatedFilePrefix(targetPath) {
   const parts = String(targetPath ?? "")
     .replace(/^\/+/, "")
     .split("/")
     .filter(Boolean);
-  if (parts.length >= 4 && parts[0] === "agents" && parts[1] === "catalog" && parts[2] === "industry-overlays") {
-    return parts.slice(0, 4).join("/");
-  }
-  // labor-commons layout: catalog/naics-overlays/{section}/{slug}/spec.yaml.
-  // Return the {section} directory so same-section sibling specialists (the
-  // topically-closest, already-researched neighbors) are treated as related,
-  // rather than the specialist's own (for a new specialist, empty) directory.
-  if (parts.length >= 4 && parts[0] === "catalog" && parts[1] === "naics-overlays") {
-    return parts.slice(0, 3).join("/");
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
+  if (overlayRoot) {
+    const rootParts = overlayRoot.split("/").filter(Boolean);
+    const matchesRoot = rootParts.length > 0 && rootParts.every((part, i) => parts[i] === part);
+    if (matchesRoot && parts.length > rootParts.length + 1) {
+      return parts.slice(0, rootParts.length + 1).join("/");
+    }
   }
   if (parts.length > 1) {
     return parts.slice(0, -1).join("/");
@@ -1387,11 +1405,25 @@ function deriveRelatedFilePrefix(targetPath) {
   return "";
 }
 
+// Opt-in via this repo's own repo.catalog.source_pattern_filenames config
+// (see config.mjs / AE_CATALOG_SOURCE_PATTERN_FILENAMES) -- filenames this
+// repo considers "source/reference material" worth surfacing to the coder
+// as context (e.g. a research-summary or manifest file convention specific
+// to that repo). Empty (the default) means this returns nothing.
 function collectSourcePatternFiles(allFiles, targetPath) {
+  const patternNames = String(env("AE_CATALOG_SOURCE_PATTERN_FILENAMES", ""))
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (patternNames.length === 0) {
+    return [];
+  }
   const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
   const relatedPrefix = deriveRelatedFilePrefix(targetPath);
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
   const limit = Number(env("AE_LOCAL_CODER_SOURCE_PATTERN_FILE_LIMIT", 8));
-  const sourcePattern = /(^|\/)(evaluation\/research-summary\.json|manifest\.ya?ml)$/;
+  const escaped = patternNames.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*"));
+  const sourcePattern = new RegExp(`(^|/)(${escaped.join("|")})$`);
   const related = [];
   const broad = [];
   for (const file of allFiles) {
@@ -1400,31 +1432,46 @@ function collectSourcePatternFiles(allFiles, targetPath) {
     }
     if (relatedPrefix && file.startsWith(`${relatedPrefix}/`)) {
       related.push(file);
-    } else if (file.startsWith("agents/catalog/industry-overlays/") || file.startsWith("catalog/naics-overlays/")) {
+    } else if (overlayRoot && file.startsWith(`${overlayRoot}/`)) {
       broad.push(file);
     }
   }
-  const priority = (file) => file.endsWith("evaluation/research-summary.json") ? 0 : 1;
+  const priority = (file) => file.endsWith(patternNames[0]) ? 0 : 1;
   return [...related.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b)), ...broad.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))]
     .slice(0, limit);
 }
 
-// Find a rich same-section sibling spec.yaml to hand the coder as a concrete
-// depth/structure exemplar. DeepSeek-V3.2 reliably imitates a full example it is
-// given but does not self-generate catalog-depth prose from instructions alone
-// (observed: it hit numeric source/task counts but produced ~350-char
-// specialty_boundary and omitted adjacent_specialties). Picking the LONGEST
-// sibling spec.yaml in the section is a cheap proxy for "the richest example".
+// Opt-in via this repo's own repo.catalog config (spec_filename,
+// exemplar_keys, first_entry_exemplar_key -- see config.mjs /
+// AE_CATALOG_SPEC_FILENAME, AE_CATALOG_EXEMPLAR_KEYS,
+// AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY). Finds a rich same-section sibling
+// file matching this repo's own catalog-entry filename convention and hands
+// the coder the specific top-level keys this repo flagged as needing a
+// concrete depth/structure exemplar to imitate (some models reliably imitate
+// a full example but under-produce equivalent depth from instructions alone).
+// Picking the LONGEST sibling in the section is a cheap proxy for "the
+// richest example". Returns null (the default for every repo) unless a
+// catalog layout and at least one exemplar key are configured.
 function collectSiblingSpecExemplar(worktree, allFiles, targetPath) {
+  const specFilename = String(env("AE_CATALOG_SPEC_FILENAME", "")).trim();
+  const exemplarKeys = String(env("AE_CATALOG_EXEMPLAR_KEYS", ""))
+    .split(",")
+    .map((key) => key.trim())
+    .filter(Boolean);
+  const firstEntryKey = String(env("AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY", "")).trim();
+  if (!specFilename || (exemplarKeys.length === 0 && !firstEntryKey)) {
+    return null;
+  }
   const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
   const relatedPrefix = deriveRelatedFilePrefix(targetPath);
   if (!relatedPrefix) {
     return null;
   }
+  const specFilenamePattern = new RegExp(`(^|/)${specFilename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
   const candidates = allFiles.filter(
     (file) =>
       file.startsWith(`${relatedPrefix}/`) &&
-      /(^|\/)spec\.ya?ml$/.test(file) &&
+      specFilenamePattern.test(file) &&
       !(targetBase && file.startsWith(`${targetBase}/`))
   );
   let best = null;
@@ -1441,30 +1488,25 @@ function collectSiblingSpecExemplar(worktree, allFiles, targetPath) {
   if (!best) {
     return null;
   }
-  // Only surface the two sections that demonstrate the depth/structure the model
-  // otherwise under-produces: metadata.specialty_boundary (how long/detailed a
-  // boundary should be) and adjacent_specialties (a section it tends to omit).
   // Injecting the whole file bloats context past the compaction threshold and
-  // makes the coder loop re-reading it, so keep this small and targeted.
-  const boundaryBlock = extractIndentedBlock(best.content, /^\s*specialty_boundary:/m);
-  const adjacentBlock = extractIndentedBlock(best.content, /^adjacent_specialties:/m);
-  // Also surface the FIRST authority_source entry so the model copies the exact
-  // field shape -- especially that the URL lives under `location:` (models drift
-  // to `url:`, which breaks the consumers and defeats the reachability check).
-  const firstSourceBlock = extractFirstListEntryBlock(best.content, /^\s*authority_sources:/m);
-  if (!boundaryBlock && !adjacentBlock && !firstSourceBlock) {
+  // makes the coder loop re-reading it, so keep this small and targeted to
+  // just the keys this repo configured as needing an exemplar.
+  const keyBlocks = exemplarKeys
+    .map((key) => extractIndentedBlock(best.content, new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`, "m")))
+    .filter(Boolean);
+  const firstEntryBlock = firstEntryKey
+    ? extractFirstListEntryBlock(best.content, new RegExp(`^\\s*${firstEntryKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`, "m"))
+    : null;
+  if (keyBlocks.length === 0 && !firstEntryBlock) {
     return null;
   }
-  const parts = [`# depth/structure exemplar from ${best.path} (a different lane -- match its depth and field shape, not its content)`];
-  if (boundaryBlock) {
-    parts.push(boundaryBlock.trimEnd());
+  const parts = [`# depth/structure exemplar from ${best.path} (a different entry -- match its depth and field shape, not its content)`];
+  for (const block of keyBlocks) {
+    parts.push(block.trimEnd());
   }
-  if (adjacentBlock) {
-    parts.push(adjacentBlock.trimEnd());
-  }
-  if (firstSourceBlock) {
-    parts.push("# authority_sources entry shape (note the URL key is `location:`, not `url:`):");
-    parts.push(firstSourceBlock.trimEnd());
+  if (firstEntryBlock) {
+    parts.push(`# ${firstEntryKey} entry shape:`);
+    parts.push(firstEntryBlock.trimEnd());
   }
   return {
     path: best.path,
@@ -1680,7 +1722,7 @@ function qualityRequirements(issueBrief, qualityState) {
   ];
   requirements.push("Follow the target repo's own delivery contract in .github/copilot-instructions.md when present; it defines what a complete, correct submission looks like for this specific repo.");
   if (qualityState.requiresAuthorityResearch) {
-    requirements.push(`At least ${Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6))} government, education, nonprofit, or open-access authority source URLs must be researched through commands before writes under the target package are accepted.`);
+    requirements.push(`At least ${Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6))} government, education, nonprofit, or open-access authority source URLs must be researched through commands before writes under the target package are accepted.`);
     requirements.push("curl or wget research commands must fetch usable source body content; headers-only responses, raw binary/PDF dumps, and ordinary commercial public pages do not count.");
   }
   return requirements;
@@ -1838,7 +1880,7 @@ function maybeCompactConversation({
   messages.splice(
     0,
     messages.length,
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(qualityState) },
     { role: "user", content: JSON.stringify(compactPayload, null, 2) }
   );
   process.stdout.write(`\n[lane-coder context-compact]\n${JSON.stringify({
@@ -1985,7 +2027,29 @@ async function chatWithLmStudio({ endpoint, model, messages }) {
   return String(body?.choices?.[0]?.message?.content ?? "");
 }
 
-function systemPrompt() {
+// The engine has no built-in notion of any repo's schema, field names, or
+// content conventions. All of that belongs in the target repo's own
+// .github/copilot-instructions.md, which is already read generically and
+// handed to the coder as initial_context.repo_quality_contract /
+// working_context.repo_quality_contract, described below as binding -- a
+// repo that wants schema-specific rules (field shapes, citation
+// preferences, date-field handling, slug-verification requirements, etc.)
+// puts them there, not in this engine. The only conditional section here is
+// the authority-research process block, included solely when this repo
+// opted into that gate (repo.quality_gates.authority_research -- see
+// config.mjs); it describes only the generic mechanics of the gate itself,
+// never what counts as a "source" for any particular repo.
+function systemPrompt(qualityState = {}) {
+  const researchRules = qualityState.requiresAuthorityResearch
+    ? `
+- This repo requires authority-source research before writing package files (see initial_context.repo_quality_contract for what counts as a valid source here). Run command actions to retrieve and verify sources before writing.
+- If initial_context.authority_source_candidates_from_repo_patterns or working_context.authority_source_candidates_from_repo_patterns is populated, prefer building from those URLs: they are drawn from already-researched related repository content and are pre-vetted candidates.
+- Keep command output small. Prefer targeted source snippets, titles, or repository searches over dumping full web pages, PDFs, archives, or full large files.
+- If multiple source URLs fail, stop inventing deep URLs. Search or read related repository files near the target path to find proven URL patterns, then fetch those.
+- Do not use echo or printf as research. Research commands must inspect real source URLs or repository evidence.
+- Use curl -sSL for source checks. Headers-only requests, empty responses, and raw binary/PDF dumps are not evidence.
+- Only cite a URL that is either (a) taken from the provided repo-derived candidates, or (b) one you have fetched successfully (HTTP 200) with curl during this run. Do NOT write a plausible-looking URL from memory that you have not confirmed.`
+    : "";
   return `You are AE Lane Coder, a coding agent running inside a repository worktree.
 You are not Codex and you must not rely on Codex.
 Use the local tools exposed by this runner by replying with one JSON object only.
@@ -2001,26 +2065,13 @@ Allowed JSON fields:
 
 Rules:
 - This run has a hard, finite iteration budget (each follow-up message states how many iterations remain). Research is only useful if it leaves enough turns to actually write the required files -- budget accordingly rather than researching indefinitely.
-- The target repository guidance supplied in initial_context.repo_quality_contract or working_context.repo_quality_contract is binding. Use it as the local equivalent of the repo's Codex instructions and audit contract.
+- The target repository guidance supplied in initial_context.repo_quality_contract or working_context.repo_quality_contract is binding. Use it as the local equivalent of the repo's Codex instructions and audit contract -- it is the authoritative source for this repo's schema, field conventions, and content requirements, not this prompt.
 - Prefer reading/searching before writing unless the required edit is obvious.
-- For the first response on a new issue, return a small read/search/command action to inspect the repository shape and source requirements; do not try to produce the whole implementation from startup context alone.
-- If authority sources are required, run command actions to retrieve government, education, nonprofit, or open-access authority source URLs before writing package files.
-- If initial_context.authority_source_candidates_from_repo_patterns or working_context.authority_source_candidates_from_repo_patterns is populated, build your authority_sources primarily from those URLs: they are drawn from already-researched sibling specialists in the SAME section and are the topically-correct, pre-vetted sources for this lane. Read the sibling research files they came from to understand why each source is authoritative for this domain.
-- A cited source must be topically authoritative for THIS specialist's specific industry and lane, not merely a real URL that returns 200. Never pad authority_sources with unrelated-but-reachable government/standards pages (e.g. consumer-product, retail-refund, or generic warranty pages for a capital-markets specialist). If you cannot find a topically-correct source, cite fewer sources rather than irrelevant ones.
-- Every authority_reason must state specifically why THAT source governs THIS lane. Identical, boilerplate authority_reason text repeated across sources is a defect and will be rejected.
-- Every authority source's URL goes under the key "location" (never "url"). Only cite a location URL that is either (a) taken from the provided repo-derived candidates, or (b) one you have fetched successfully (HTTP 200) with curl during this run. Do NOT write a plausible-looking URL from memory that you have not confirmed -- a fabricated or dead link (HTTP 404) fails validation. Prefer citing a stable top-level authority page you can verify over guessing a deep path.
-- Keep command output small. Prefer targeted source snippets, titles, standards sections, or repository searches over dumping full web pages, PDFs, archives, or full large files.
+- For the first response on a new issue, return a small read/search/command action to inspect the repository shape and requirements; do not try to produce the whole implementation from startup context alone.
 - If a command fails, do not repeat the same command. Correct the syntax or choose a different command.
-- If multiple source URLs fail, stop inventing deep URLs. Search or read related repository files near the target path to find proven authority URL patterns, then fetch those authority sources.
-- Do not use echo or printf as research. Research commands must inspect authority source URLs or repository evidence.
-- Use curl -sSL for source checks. Headers-only requests, empty responses, raw binary/PDF dumps, and ordinary commercial public pages are not evidence.
 - Write only under the target_path from the user context unless explicitly asked to modify shared config.
-- If initial_context.sibling_spec_exemplar or working_context.sibling_spec_exemplar is present, it is a real, currently-accepted spec from the SAME section. Match its depth and structure: your specialty_boundary must be as long and concretely detailed as the exemplar's (do not truncate to a sentence or two), and you must include every structural section the exemplar has, including adjacent_specialties. Do not copy its content -- your specialist is a different lane -- but do copy its level of specificity and completeness.
-- For any date field (created_at, last_updated_at, last_reviewed, stale_after, source_baseline_version, next_review_due_at, etc.), use current_date_utc from the context as "today" and compute other dates relative to it. Do not invent a date or reuse one recalled from training data; a stale_after that has already passed on the creation date is a defect.
-- Never use placeholders, example.com, generic "Scenario 1" style labels, TODO/TBD text, or invented authority sources.
-- When writing adjacent_specialties, list ONLY real sibling specialist slugs that actually exist in the catalog. Before writing the list, run a command (e.g. ls on the section directory) to discover the real slugs. Never invent a slug that sounds plausible -- if it does not exist as a directory under catalog/naics-overlays/{section}/, it will fail validation. Use at least 3 real sibling slugs.
-- Preserve the specialist's semantic identity. If an existing spec.yaml is being updated, read it first and preserve its core purpose, boundary discipline, and authority source quality. Do not rewrite a gatekeeper/router specialist as a transaction executor, or replace specific regulatory citations (e.g. ADA, FTC, DOT, CFPB) with generic industry publications. If the existing spec has better authority sources than your draft, keep them and refresh their dates rather than replacing them with weaker sources.
-- Prefer primary regulators, statutes, and official standards (e.g. DOJ ADA, FTC, DOT, CFPB, PCI SSC, SEC, FINRA) over secondary explainers, industry publications, or occupational handbooks. A BLS occupational profile or industry association homepage is a weaker authority than a specific regulation or standard that directly governs the lane's decisions.
+- If initial_context.sibling_spec_exemplar or working_context.sibling_spec_exemplar is present, it is a real, currently-accepted example from the same area of the repo. Match its depth and structure (do not copy its content -- your task is different, but match its level of specificity and completeness, including every structural section it has).
+- Never use placeholders, example.com, generic "Scenario 1" style labels, or TODO/TBD text.${researchRules}
 - When writing a file, provide the complete desired content for that file.
 - Keep changes focused on the issue.
 - Do not edit .git internals.
@@ -2080,7 +2131,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
   qualityState.sourcePatternFiles = normalizeArray(initialContext.source_pattern_files);
   process.stdout.write(`\n[lane-coder context]\n${JSON.stringify(summarizeInitialContext(initialContext, issueBrief), null, 2)}\n`);
   const messages = [
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(qualityState) },
     {
       role: "user",
       content: JSON.stringify({
@@ -2184,7 +2235,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
             forced_final_write: true,
             instruction:
               `You are out of research turns and have written nothing. Stop all reads, searches, and commands. In THIS turn, return a write_files action that writes the complete file at ${targetPathForWrite}. ` +
-              "Match the sibling_spec_exemplar's depth and structure (full specialty_boundary and adjacent_specialties), use the authority sources already gathered, and use current_date_utc for date fields. A complete file written now is required; partial sourcing is acceptable."
+              "If a sibling_spec_exemplar was provided, match its depth and structure. Use whatever research/sources you have already gathered. A complete file written now is required; partial sourcing is acceptable."
           })
         });
         process.stdout.write(`\n[lane-coder forced-final-write]\n${JSON.stringify({ target_path: targetPathForWrite }, null, 2)}\n`);
@@ -2213,7 +2264,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
     }
     const iterationsRemaining = maxIterations - iteration;
     const authorityResearchMet = qualityState.authorityResearchEvidence.length >=
-      Number(env("AE_LOCAL_CODER_MIN_AUTHORITY_SOURCES", 6));
+      Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6));
     const forcedByBudget = !authorityResearchMet && !status && iterationsRemaining <= forceWriteIterationsRemaining;
     if (forcedByBudget) {
       qualityState.authorityResearchWaived = true;
@@ -2323,7 +2374,11 @@ async function finalizeLocalPullRequest(worktree) {
     return;
   }
 
-  const title = issueTitle.startsWith("spec-pack:")
+  // If this repo's own issue_source.required_issue_prefix (see config.mjs)
+  // already gives every matched issue title a repo-chosen prefix, keep it
+  // verbatim rather than double-prefixing with a generic "Resolve #N:".
+  const requiredPrefix = String(env("AE_ISSUE_REQUIRED_PREFIX", ""));
+  const title = requiredPrefix && issueTitle.startsWith(requiredPrefix)
     ? issueTitle
     : `Resolve #${issueNumber}: ${issueTitle}`;
   const provider = env("AE_LANE_PROVIDER", "");
