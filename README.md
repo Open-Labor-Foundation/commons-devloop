@@ -8,6 +8,15 @@ Point it at a repository with open issues. It picks them up, writes code, opens 
 
 > **Experimental release.** This is functional but still early — rough edges exist. See [CONTRIBUTING.md](CONTRIBUTING.md) for current contribution status.
 
+> **Known shortcomings:** see [open-labor-foundation/ARCHITECTURE.md](https://github.com/Open-Labor-Foundation/open-labor-foundation/blob/main/ARCHITECTURE.md)
+> for the full ecosystem picture. commons-devloop is actively in use, but
+> transitional: its job — turning a defined need into working, reviewed code
+> — is exactly the build capability commons-board is currently missing
+> internally. Once commons-crew's recursive delegation gives commons-board
+> native build capacity, an external automation engine doing the same job
+> from outside the governed structure is expected to be retired or absorbed
+> rather than maintained indefinitely as separate infrastructure.
+
 ---
 
 ## What it does
