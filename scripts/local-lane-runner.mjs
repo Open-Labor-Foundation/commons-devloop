@@ -931,6 +931,23 @@ async function changedFiles(worktree) {
 async function validateLocalCoderQuality(worktree, issueBrief, qualityState) {
   const issues = [];
   const files = await changedFiles(worktree);
+
+  // Reject changes outside the target directory. A model that writes files
+  // outside the target_path (e.g. a legacy multi-file format across many
+  // directories) must be caught here before the PR is created. Observed
+  // live: PR #545 on labor-commons shipped 3000 files across 10 unrelated
+  // specialists because no out-of-scope guard existed.
+  const enforceTargetPath = parseBoolean(env("AE_LOCAL_CODER_ENFORCE_TARGET_PATH", "1"), true);
+  if (enforceTargetPath && qualityState.targetPath) {
+    const targetDir = path.posix.dirname(String(qualityState.targetPath).replace(/^\/+/, "")) + "/";
+    for (const file of files) {
+      const normalizedFile = String(file).replace(/^\/+/, "");
+      if (!normalizedFile.startsWith(targetDir) && normalizedFile !== targetDir.replace(/\/$/, "")) {
+        issues.push(`${file}: changed file is outside the target directory (${targetDir})`);
+      }
+    }
+  }
+
   for (const file of files) {
     const filePath = resolveWorktreePath(worktree, file);
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
@@ -1042,7 +1059,27 @@ function extractJsonObject(text) {
   }
 }
 
-async function applyUnifiedDiff(worktree, diff) {
+async function applyUnifiedDiff(worktree, diff, qualityState = {}) {
+  // Pre-validate the diff's file paths against the target directory before
+  // applying. A unified_diff that touches files outside the target_path
+  // (e.g. a legacy multi-file format across many directories) must be
+  // rejected before git apply runs. Observed live: PR #545 on labor-commons
+  // shipped 3000 files because no out-of-scope guard existed.
+  const enforceTargetPath = parseBoolean(env("AE_LOCAL_CODER_ENFORCE_TARGET_PATH", "1"), true);
+  if (enforceTargetPath && qualityState.targetPath) {
+    const targetDir = path.posix.dirname(String(qualityState.targetPath).replace(/^\/+/, "")) + "/";
+    const diffText = String(diff);
+    const diffFilePaths = diffText.match(/^(?:\+\+\+|---) [ab]\//gm) || [];
+    for (const line of diffFilePaths) {
+      const filePath = line.replace(/^(?:\+\+\+|---) [ab]\//, "").trim();
+      if (filePath === "/dev/null") { continue; }
+      const normalized = filePath.replace(/^\/+/, "");
+      if (!normalized.startsWith(targetDir) && normalized !== targetDir.replace(/\/$/, "")) {
+        throw new Error(`unified_diff touches file outside target directory: ${filePath} (target: ${targetDir})`);
+      }
+    }
+  }
+
   const child = spawn("git", ["apply", "--whitespace=fix", "-"], {
     cwd: worktree,
     stdio: ["pipe", "pipe", "pipe"]
@@ -1310,7 +1347,7 @@ async function executeAction(worktree, action, qualityState = {}) {
 
   if (action.unified_diff) {
     try {
-      await applyUnifiedDiff(worktree, action.unified_diff);
+      await applyUnifiedDiff(worktree, action.unified_diff, qualityState);
       observations.push({ type: "unified_diff", applied: true });
     } catch (error) {
       // A malformed/corrupt patch must not crash the whole run -- treat it as a
@@ -1326,10 +1363,26 @@ async function executeAction(worktree, action, qualityState = {}) {
   }
 
   const writtenMarkdownPaths = [];
+  const enforceTargetPath = parseBoolean(env("AE_LOCAL_CODER_ENFORCE_TARGET_PATH", "1"), true);
+  const targetDir = enforceTargetPath && qualityState.targetPath
+    ? path.posix.dirname(String(qualityState.targetPath).replace(/^\/+/, "")) + "/"
+    : null;
   for (const entry of writes.slice(0, 20)) {
     const relativePath = entry?.path;
     if (!relativePath) {
       continue;
+    }
+    if (targetDir) {
+      const normalizedWritePath = String(relativePath).replace(/^\/+/, "");
+      if (!normalizedWritePath.startsWith(targetDir) && normalizedWritePath !== targetDir.replace(/\/$/, "")) {
+        observations.push({
+          type: "quality_gate",
+          path: relativePath,
+          rejected: true,
+          issues: [`write path is outside the target directory (${targetDir}); only write under the target_path`]
+        });
+        continue;
+      }
     }
     const qualityIssues = assessContentQuality(relativePath, entry.content, qualityState);
     if (qualityIssues.length > 0) {
@@ -2337,7 +2390,36 @@ async function finalizeLocalPullRequest(worktree) {
 
   const status = await gitStatus(worktree);
   if (status) {
-    await requireCommandSuccess("git", ["add", "-A"], { cwd: worktree });
+    // When a target_path is known, stage only files under that directory
+    // instead of `git add -A`. This prevents a model that wrote files
+    // outside the target (e.g. a legacy multi-file format across many
+    // directories) from committing them into the PR. Observed live: PR #545
+    // on labor-commons shipped 3000 files across 10 unrelated specialists
+    // because `git add -A` staged everything the model wrote.
+    const enforceTargetPath = parseBoolean(env("AE_LOCAL_CODER_ENFORCE_TARGET_PATH", "1"), true);
+    const targetPathForStaging = enforceTargetPath
+      ? env("AE_CATALOG_OVERLAY_ROOT", "").replace(/\/+$/, "")
+      : "";
+    if (targetPathForStaging) {
+      await requireCommandSuccess("git", ["add", "--", `${targetPathForStaging}/`], { cwd: worktree });
+    } else {
+      await requireCommandSuccess("git", ["add", "-A"], { cwd: worktree });
+    }
+
+    // Final safety net: reject PRs with an unreasonable number of staged
+    // files. A spec-pack issue should produce 1-3 files; anything above
+    // the threshold indicates the model wrote out of scope. Observed live:
+    // PR #545 shipped 3000 files. Default threshold is 10.
+    const stagedResult = await runCommand("git", ["diff", "--cached", "--name-only"], { cwd: worktree });
+    const stagedFiles = stagedResult.stdout.split(/\r?\n/).filter(Boolean);
+    const maxFiles = Number(env("AE_LOCAL_CODER_MAX_PR_FILES", 10));
+    if (stagedFiles.length > maxFiles) {
+      throw new Error(
+        `Lane coder staged ${stagedFiles.length} files (max ${maxFiles}). ` +
+        `This likely means the model wrote out of scope. First 10: ${stagedFiles.slice(0, 10).join(", ")}`
+      );
+    }
+
     await requireCommandSuccess("git", ["config", "user.name", env("AE_GIT_AUTHOR_NAME", "AE Lane Coder")], { cwd: worktree });
     await requireCommandSuccess("git", ["config", "user.email", env("AE_GIT_AUTHOR_EMAIL", "ae-lane-coder@example.invalid")], { cwd: worktree });
     await requireCommandSuccess("git", ["commit", "-m", `Resolve issue #${issueNumber}`], { cwd: worktree });
