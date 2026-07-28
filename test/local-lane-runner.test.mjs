@@ -963,7 +963,11 @@ Use public authoritative source research.
       () => runRunner({
         baseUrl,
         prompt,
-        env: { AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays" },
+        env: {
+          AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays",
+          AE_CATALOG_SPEC_FILENAME: "spec.yaml",
+          AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY: "authority_sources"
+        },
         setupWorktree: (worktree) => {
           const siblingSpecPath = path.join(
             worktree,
@@ -1015,6 +1019,49 @@ Use public authoritative source research.
       JSON.stringify(startupPayload.initial_context.required_first_steps),
       /catalog\/naics-overlays\/hospitality-and-travel\/reservations-specialist\/spec\.yaml/
     );
+  } finally {
+    server.close();
+  }
+});
+
+// Pins the actual point of fix/repo-agnostic-engine: a repo with no
+// quality_gates.authority_research config gets NO authority-research gate at
+// all, even for an issue whose text would have tripped the old, always-on
+// hardcoded regex (authority|authoritative|source|research|...). Every other
+// test in this file supplies AE_AUTHORITY_RESEARCH_KEYWORDS via runRunner's
+// shared baseline env specifically to keep exercising the gate -- this test
+// explicitly clears it to prove the opt-in default is really off, not just
+// that a configured repo still behaves like before.
+test("local lane runner never gates on authority research when the repo has no quality_gates config", async () => {
+  const prompt = `Implement issue #1
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        write_files: [
+          { path: "answer.txt", content: "no research performed\n" }
+        ],
+        done: true,
+        summary: "created answer without any authority-source research"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      prompt,
+      env: { AE_AUTHORITY_RESEARCH_KEYWORDS: "" }
+    });
+    assert.equal(
+      fs.readFileSync(path.join(result.worktree, "answer.txt"), "utf8"),
+      "no research performed\n"
+    );
+    assert.match(result.stdout, /Lane coder completed with changes/);
   } finally {
     server.close();
   }
