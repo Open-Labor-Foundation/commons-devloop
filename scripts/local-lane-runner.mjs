@@ -2168,7 +2168,26 @@ async function chatWithLmStudio({ endpoint, model, messages }) {
     }),
     timeoutMs: Number(env("AE_LOCAL_CODER_CHAT_TIMEOUT_MS", DEFAULT_CHAT_TIMEOUT_MS))
   });
-  return String(body?.choices?.[0]?.message?.content ?? "");
+  const choice = body?.choices?.[0];
+  const content = String(choice?.message?.content ?? "");
+  // Reasoning models (e.g. Featherless's GLM-5.2) split "thinking" into
+  // message.reasoning, separate from message.content. When the reasoning
+  // phase alone consumes the token budget, the API returns HTTP 200 with
+  // finish_reason: "length" and an EMPTY content string -- a truncated
+  // failure, not a valid empty response. Returning "" here silently, as a
+  // prior version did, feeds an empty string into the JSON-action parser as
+  // if the model legitimately produced nothing, which the rest of this file
+  // has no way to distinguish from a real (rare, otherwise-handled) empty
+  // turn. Throw instead so chatWithRetry retries it like any other
+  // transient failure.
+  if (content.trim() === "" && choice?.finish_reason === "length" && choice?.message?.reasoning) {
+    throw new Error(
+      `truncated reasoning-only response (finish_reason=length, empty content, ` +
+      `${String(choice.message.reasoning).length} reasoning chars) -- the reasoning phase alone ` +
+      "consumed the token budget before any content was produced"
+    );
+  }
+  return content;
 }
 
 // The engine has no built-in notion of any repo's schema, field names, or
@@ -2237,7 +2256,8 @@ function isRetryableChatError(error) {
   return /^42\d\s/.test(message) ||
     /^5\d\d\s/.test(message) ||
     /fetch failed/i.test(message) ||
-    /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i.test(message);
+    /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i.test(message) ||
+    /truncated reasoning-only response/.test(message);
 }
 
 async function chatWithRetry(chat) {

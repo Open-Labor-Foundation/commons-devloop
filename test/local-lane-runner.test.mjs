@@ -1843,3 +1843,104 @@ agents/catalog/industry-overlays/information-software-and-digital-media/software
     server.close();
   }
 });
+
+function startOpenAiCompatibleStub({ responses = [] }) {
+  const requests = [];
+  let index = 0;
+  const server = http.createServer((req, res) => {
+    const requestRecord = { method: req.method, url: req.url };
+    requests.push(requestRecord);
+    if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        requestRecord.body = JSON.parse(body);
+        const entry = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(entry));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        server,
+        requests,
+        baseUrl: `http://127.0.0.1:${server.address().port}`
+      });
+    });
+  });
+}
+
+// Regression test for a real gotcha hit deploying against Featherless's
+// GLM-5.2: reasoning models split "thinking" into message.reasoning,
+// separate from message.content. When the reasoning phase alone consumes
+// the token budget, the API returns HTTP 200 with finish_reason: "length"
+// and an EMPTY content string -- a truncated failure, not a valid empty
+// response. A prior version returned that empty string as if the model had
+// legitimately produced nothing; this pins that it's now treated as a
+// retryable error instead, and that a subsequent successful response is
+// used once the retry lands.
+test("local lane runner retries a truncated reasoning-only response instead of treating empty content as valid", async () => {
+  const { server, baseUrl, requests } = await startOpenAiCompatibleStub({
+    responses: [
+      {
+        id: "truncated",
+        object: "chat.completion",
+        model: "zai-org/GLM-5.2",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", reasoning: "thinking about how best to respond to this issue...", content: "" },
+            finish_reason: "length"
+          }
+        ]
+      },
+      {
+        id: "recovered",
+        object: "chat.completion",
+        model: "zai-org/GLM-5.2",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                write_files: [{ path: "answer.txt", content: "recovered after retry\n" }],
+                done: true,
+                summary: "created answer after retry"
+              })
+            },
+            finish_reason: "stop"
+          }
+        ]
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      env: {
+        AE_LOCAL_MODEL_PROVIDER: "openai_compatible",
+        AE_LOCAL_MODEL_ENDPOINT: `${baseUrl}/v1`,
+        AE_LOCAL_CODER_CHAT_RETRY_BASE_MS: "10",
+        AE_LOCAL_CODER_CHAT_RETRY_MAX_MS: "20"
+      }
+    });
+    assert.equal(
+      fs.readFileSync(path.join(result.worktree, "answer.txt"), "utf8"),
+      "recovered after retry\n"
+    );
+    assert.equal(requests.filter((r) => r.url === "/v1/chat/completions").length, 2);
+  } finally {
+    server.close();
+  }
+});
