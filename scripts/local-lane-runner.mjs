@@ -899,6 +899,7 @@ function buildQualityState(issueBrief = {}) {
     authorityResearchEvidence: [],
     failedCommands: [],
     sourcePatternFiles: [],
+    relatedFilePrefix: null,
     // Sticky: once the iteration budget runs low, waive the authority-source
     // minimum for the rest of this run rather than flip-flopping the
     // requirement turn to turn.
@@ -1164,10 +1165,7 @@ async function executeAction(worktree, action, qualityState = {}) {
         source_pattern_files: normalizeArray(qualityState.sourcePatternFiles).slice(0, 8),
         suggested_action: {
           read_files: normalizeArray(qualityState.sourcePatternFiles).slice(0, 4),
-          searches: [
-            { query: "authority_sources", glob: "agents/catalog/industry-overlays/**/evaluation/research-summary.json" },
-            { query: "source_audit", glob: "agents/catalog/industry-overlays/**/evaluation/research-summary.json" }
-          ]
+          searches: buildSourcePatternSearches(qualityState.relatedFilePrefix)
         }
       });
       recordFailedCommand(qualityState, command);
@@ -1385,6 +1383,29 @@ function deriveRelatedFilePrefix(targetPath) {
     return parts.slice(0, -1).join("/");
   }
   return "";
+}
+
+// Build the sibling-source-pattern search suggestion from the repo's own
+// configured catalog.overlay_root (AE_CATALOG_OVERLAY_ROOT) plus the record's
+// own related-file prefix, rather than a hardcoded path. A prior version
+// hardcoded "agents/catalog/industry-overlays/**" here -- a layout no repo on
+// catalog.overlay_root: catalog/naics-overlays has ever had -- so the search
+// silently matched nothing and the guardrail it backs never actually
+// grounded anything. Scoping to relatedFilePrefix (the record's own section)
+// also matters on its own: an unscoped catalog-wide glob lets a thin section
+// (e.g. hospitality, home-services) pattern-match off an unrelated, denser
+// section (e.g. healthcare) elsewhere in the same catalog.
+function buildSourcePatternSearches(relatedFilePrefix) {
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
+  const scope = relatedFilePrefix || overlayRoot;
+  if (!scope) {
+    return [];
+  }
+  const glob = `${scope}/**/evaluation/research-summary.json`;
+  return [
+    { query: "authority_sources", glob },
+    { query: "source_audit", glob }
+  ];
 }
 
 function collectSourcePatternFiles(allFiles, targetPath) {
@@ -1608,7 +1629,10 @@ async function buildInitialContext(worktree, issueBrief = {}) {
       ? [
           sourcePatternFiles.length > 0
             ? `Read or search structured source pattern files before broad URL guessing: ${sourcePatternFiles.slice(0, 4).join(", ")}.`
-            : "Search the repository for existing structured source records before broad URL guessing.",
+            : "No structured source-pattern files exist yet for this section. Do not substitute sibling records from a " +
+              "different, unrelated industry section as a stand-in, and do not invent or recall authority sources from " +
+              "training data to fill the gap -- use only sources retrieved live via command output, or sources explicitly " +
+              "given in the issue brief.",
           nonPdfAuthorityCandidates.length > 0
             ? `Use these repo-derived non-PDF authority candidates first with curl -sSL before trying PDFs: ${nonPdfAuthorityCandidates.join(", ")}.`
             : "Prefer non-PDF authority pages first; PDF sources are acceptable only when converted to small text snippets, never dumped as raw bytes."
@@ -1620,7 +1644,10 @@ async function buildInitialContext(worktree, issueBrief = {}) {
     source_pattern_files: sourcePatternFiles,
     source_pattern_instruction: sourcePatternFiles.length > 0
       ? "If authority source URL commands fail, read or search these repository files to find proven public authority source patterns before trying more URLs. These files are dynamic repo context, not hardcoded sources."
-      : "If authority source URL commands fail, search repository research-summary.json and manifest.yaml files for proven public authority source patterns before trying more URLs.",
+      : "This section has no existing research-summary.json or manifest.yaml files to ground against -- it is genuinely " +
+        "new, not a search-tooling gap. If authority source URL commands keep failing, do not widen the search to a " +
+        "different industry section's files and do not fall back to recalled/plausible-sounding sources. Prefer live, " +
+        "directly-fetched public sources; if none can be retrieved, leave the source list short rather than fabricated.",
     authority_source_candidates_from_repo_patterns: authoritySourceCandidates,
     sibling_spec_exemplar: siblingSpecExemplar,
     repo_quality_contract: repoGuidance,
@@ -1891,9 +1918,27 @@ function deriveTargetPathFromSlug(prompt) {
   return `${overlayRoot}/${segments.join("/")}/${specFilename}`;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// A literal path embedded directly in the issue body (as opposed to the
+// "::"-delimited Queue Agent Slug labor-commons uses -- see
+// deriveTargetPathFromSlug) is matched against the repo's own configured
+// catalog.overlay_root when set, not a hardcoded layout. A prior version
+// hardcoded "agents/catalog/industry-overlays/..." here unconditionally; for
+// any repo configured with a different overlay_root (e.g. labor-commons'
+// catalog/naics-overlays) that pattern never matches anything real, so this
+// path silently always fell through. Falls back to the legacy literal only
+// when no overlay_root is configured, to stay compatible with any caller
+// that still relies on the old default.
 function buildIssueBrief(prompt) {
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
+  const explicitPathPattern = overlayRoot
+    ? new RegExp(`${escapeRegExp(overlayRoot)}/[^\\s\`]+`)
+    : /agents\/catalog\/industry-overlays\/[^\s`]+/;
   const targetPath =
-    prompt.match(/agents\/catalog\/industry-overlays\/[^\s`]+/)?.[0] ??
+    prompt.match(explicitPathPattern)?.[0] ??
     deriveTargetPathFromSlug(prompt) ??
     null;
   const brief = {
@@ -2078,6 +2123,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
   const qualityState = buildQualityState(issueBrief);
   const initialContext = await buildInitialContext(worktree, issueBrief);
   qualityState.sourcePatternFiles = normalizeArray(initialContext.source_pattern_files);
+  qualityState.relatedFilePrefix = initialContext.related_file_prefix ?? null;
   process.stdout.write(`\n[lane-coder context]\n${JSON.stringify(summarizeInitialContext(initialContext, issueBrief), null, 2)}\n`);
   const messages = [
     { role: "system", content: systemPrompt() },
