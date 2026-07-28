@@ -7,10 +7,27 @@ repo:
   # issue's Queue Agent Slug (industry-overlays::{section}::{agent}). Without
   # this, target_path is null and section-based sibling authority-source
   # harvesting never fires.
+  #
+  # exemplar_keys/first_entry_exemplar_key restore the depth/structure
+  # exemplar this repo depended on before the engine was genericized
+  # (fix/repo-agnostic-engine): DeepSeek-V3.2 reliably imitates a full
+  # example it's given but under-produces depth from instructions alone
+  # (observed: hit numeric source/task counts but produced a ~350-char
+  # specialty_boundary and omitted adjacent_specialties). source_pattern_filenames
+  # is deliberately empty -- this catalog's README forbids the
+  # research-summary.json/manifest.yaml convention that field targets;
+  # grounding instead comes from real sibling spec.yaml authority_sources
+  # (collectSiblingSpecAuthoritySources / buildSourcePatternSearches's direct
+  # spec_filename search, both unconditional on this list).
   catalog:
     overlay_root: catalog/naics-overlays
     spec_filename: spec.yaml
     slug_prefix: industry-overlays
+    exemplar_keys:
+      - specialty_boundary
+      - adjacent_specialties
+    first_entry_exemplar_key: authority_sources
+    source_pattern_filenames: []
   default_branch: main
 
 lifecycle:
@@ -34,6 +51,25 @@ lifecycle:
 issue_source:
   labels: []
   required_issue_prefix: "spec-pack: "
+
+# Restores this repo's pre-genericization always-on authority-research gate
+# (fix/repo-agnostic-engine made it opt-in per repo; every other repo now
+# defaults off). min_sources: 8 matches .github/copilot-instructions.md's
+# "knowledge_baseline.authority_sources ... at least 8 (catalog median is 9)"
+# -- the engine's own generic default is 6, which undercounted this repo's
+# real requirement even before genericization.
+quality_gates:
+  authority_research:
+    trigger_keywords:
+      - authority
+      - authoritative
+      - source
+      - research
+      - owasp
+      - cfr
+      - nist
+      - cisa
+    min_sources: 8
 
 # Model changed 2026-07-07: Qwen3-Coder-30B-A3B-Instruct was a code-generation
 # specialist model doing a general-knowledge/regulatory-research job, with no
