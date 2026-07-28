@@ -899,6 +899,7 @@ function buildQualityState(issueBrief = {}) {
     authorityResearchEvidence: [],
     failedCommands: [],
     sourcePatternFiles: [],
+    relatedFilePrefix: null,
     // Sticky: once the iteration budget runs low, waive the authority-source
     // minimum for the rest of this run rather than flip-flopping the
     // requirement turn to turn.
@@ -1164,10 +1165,7 @@ async function executeAction(worktree, action, qualityState = {}) {
         source_pattern_files: normalizeArray(qualityState.sourcePatternFiles).slice(0, 8),
         suggested_action: {
           read_files: normalizeArray(qualityState.sourcePatternFiles).slice(0, 4),
-          searches: [
-            { query: "authority_sources", glob: "agents/catalog/industry-overlays/**/evaluation/research-summary.json" },
-            { query: "source_audit", glob: "agents/catalog/industry-overlays/**/evaluation/research-summary.json" }
-          ]
+          searches: buildSourcePatternSearches(qualityState.relatedFilePrefix)
         }
       });
       recordFailedCommand(qualityState, command);
@@ -1387,6 +1385,38 @@ function deriveRelatedFilePrefix(targetPath) {
   return "";
 }
 
+// Build the sibling-source-pattern search suggestion from the repo's own
+// configured catalog.overlay_root (AE_CATALOG_OVERLAY_ROOT) plus the record's
+// own related-file prefix, rather than a hardcoded path. A prior version
+// hardcoded "agents/catalog/industry-overlays/**" here -- a layout no repo on
+// catalog.overlay_root: catalog/naics-overlays has ever had -- so the search
+// silently matched nothing and the guardrail it backs never actually
+// grounded anything. Scoping to relatedFilePrefix (the record's own section)
+// also matters on its own: an unscoped catalog-wide glob lets a thin section
+// (e.g. hospitality, home-services) pattern-match off an unrelated, denser
+// section (e.g. healthcare) elsewhere in the same catalog.
+//
+// Includes both the research-summary.json/manifest.yaml convention AND a
+// direct spec.yaml search: some catalog formats (labor-commons' README
+// explicitly forbids research-summary.json/manifest.yaml) only ever have the
+// latter. Suggesting only the former means this always resolves to nothing
+// for such a repo even when real, already-vetted authority_sources exist in
+// sibling spec.yaml files.
+function buildSourcePatternSearches(relatedFilePrefix) {
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
+  const scope = relatedFilePrefix || overlayRoot;
+  if (!scope) {
+    return [];
+  }
+  const specFilename = String(env("AE_CATALOG_SPEC_FILENAME", "")).trim() || "spec.yaml";
+  const researchSummaryGlob = `${scope}/**/evaluation/research-summary.json`;
+  return [
+    { query: "authority_sources", glob: researchSummaryGlob },
+    { query: "source_audit", glob: researchSummaryGlob },
+    { query: "authority_sources", glob: `${scope}/**/${specFilename}` }
+  ];
+}
+
 function collectSourcePatternFiles(allFiles, targetPath) {
   const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
   const relatedPrefix = deriveRelatedFilePrefix(targetPath);
@@ -1567,6 +1597,53 @@ function collectAuthoritySourceCandidates(worktree, sourcePatternFiles) {
   return candidates;
 }
 
+// collectAuthoritySourceCandidates only reads sourcePatternFiles (research-
+// summary.json/manifest.yaml), which some catalog formats explicitly forbid
+// -- labor-commons' catalog/README.md: "Do not create manifest.yaml,
+// evaluation/, ... those belong to a different, older format this repo does
+// not use." For that format collectAuthoritySourceCandidates always returns
+// empty, not because no real grounding data exists, but because it's looking
+// in the wrong place: the real, already-vetted source data lives directly in
+// sibling spec.yaml files' own authority_sources blocks. Read those instead.
+function collectSiblingSpecAuthoritySources(worktree, allFiles, targetPath) {
+  const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
+  const relatedPrefix = deriveRelatedFilePrefix(targetPath);
+  if (!relatedPrefix) {
+    return [];
+  }
+  const limit = Number(env("AE_LOCAL_CODER_SIBLING_SOURCE_CANDIDATE_LIMIT", 8));
+  const candidates = [];
+  const seen = new Set();
+  const specFiles = allFiles.filter(
+    (file) =>
+      file.startsWith(`${relatedPrefix}/`) &&
+      /(^|\/)spec\.ya?ml$/.test(file) &&
+      !(targetBase && file.startsWith(`${targetBase}/`))
+  );
+  for (const relativePath of specFiles) {
+    if (candidates.length >= limit) {
+      break;
+    }
+    const filePath = path.join(worktree, relativePath);
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+    const content = fs.readFileSync(filePath, "utf8");
+    const authoritySourcesBlock = extractIndentedBlock(content, /^\s*authority_sources:/m) ?? "";
+    for (const url of extractUrls(authoritySourcesBlock).filter(openAuthoritySourceUrl)) {
+      if (seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+      candidates.push({ url, source_file: relativePath });
+      if (candidates.length >= limit) {
+        break;
+      }
+    }
+  }
+  return candidates;
+}
+
 async function buildInitialContext(worktree, issueBrief = {}) {
   const [status, files, packageJson, readme] = await Promise.all([
     runCommand("git", ["status", "--short", "--untracked-files=all"], { cwd: worktree }),
@@ -1587,12 +1664,27 @@ async function buildInitialContext(worktree, issueBrief = {}) {
     : [];
   const sourcePatternFiles = collectSourcePatternFiles(allFiles, issueBrief.target_path);
   const authoritySourceCandidates = collectAuthoritySourceCandidates(worktree, sourcePatternFiles);
+  const siblingSpecAuthoritySources = collectSiblingSpecAuthoritySources(worktree, allFiles, issueBrief.target_path);
   const siblingSpecExemplar = collectSiblingSpecExemplar(worktree, allFiles, issueBrief.target_path);
   const repoGuidance = buildRepoGuidanceContext(worktree);
-  const nonPdfAuthorityCandidates = authoritySourceCandidates
-    .map((entry) => entry.url)
+  const combinedAuthorityCandidates = [...authoritySourceCandidates, ...siblingSpecAuthoritySources];
+  const nonPdfAuthorityCandidates = [...new Set(combinedAuthorityCandidates.map((entry) => entry.url))]
     .filter((url) => !/\.pdf(?:$|[?#])/i.test(url))
     .slice(0, Number(env("AE_LOCAL_CODER_NON_PDF_SOURCE_CANDIDATE_LIMIT", 6)));
+  // The files a "go read/search real grounding data" instruction should
+  // actually point at: research-summary.json/manifest.yaml files when that
+  // (now rare, format-specific) convention is in use, otherwise the sibling
+  // spec.yaml files that already carry real, vetted authority_sources for
+  // this section -- which for a repo like labor-commons (whose catalog
+  // README explicitly forbids research-summary.json/manifest.yaml) are the
+  // ONLY real grounding data that exists. Pointing this at sourcePatternFiles
+  // alone, as an earlier version did, meant that instruction always resolved
+  // to nothing for such a repo even though real sibling sources were sitting
+  // right there in already-validated spec.yaml files.
+  const groundingFiles = sourcePatternFiles.length > 0
+    ? sourcePatternFiles
+    : [...new Set(siblingSpecAuthoritySources.map((entry) => entry.source_file))]
+      .slice(0, Number(env("AE_LOCAL_CODER_SOURCE_PATTERN_FILE_LIMIT", 8)));
 
   return {
     git_status: truncate(status.stdout, 4000),
@@ -1606,9 +1698,12 @@ async function buildInitialContext(worktree, issueBrief = {}) {
     target_path: issueBrief.target_path ?? null,
     required_first_steps: requiresAuthorityResearch(issueBrief)
       ? [
-          sourcePatternFiles.length > 0
-            ? `Read or search structured source pattern files before broad URL guessing: ${sourcePatternFiles.slice(0, 4).join(", ")}.`
-            : "Search the repository for existing structured source records before broad URL guessing.",
+          groundingFiles.length > 0
+            ? `Read or search structured source pattern files before broad URL guessing: ${groundingFiles.slice(0, 4).join(", ")}.`
+            : "No sibling records exist yet for this section -- it is genuinely new, not a search-tooling gap. Do not " +
+              "substitute sibling records from a different, unrelated industry section as a stand-in, and do not invent " +
+              "or recall authority sources from training data to fill the gap -- use only sources retrieved live via " +
+              "command output, or sources explicitly given in the issue brief.",
           nonPdfAuthorityCandidates.length > 0
             ? `Use these repo-derived non-PDF authority candidates first with curl -sSL before trying PDFs: ${nonPdfAuthorityCandidates.join(", ")}.`
             : "Prefer non-PDF authority pages first; PDF sources are acceptable only when converted to small text snippets, never dumped as raw bytes."
@@ -1617,11 +1712,15 @@ async function buildInitialContext(worktree, issueBrief = {}) {
     files: allFiles.slice(0, Number(env("AE_LOCAL_CODER_FILE_LIST_LIMIT", 10))),
     related_file_prefix: relatedPrefix || null,
     related_files: relatedFiles,
-    source_pattern_files: sourcePatternFiles,
-    source_pattern_instruction: sourcePatternFiles.length > 0
-      ? "If authority source URL commands fail, read or search these repository files to find proven public authority source patterns before trying more URLs. These files are dynamic repo context, not hardcoded sources."
-      : "If authority source URL commands fail, search repository research-summary.json and manifest.yaml files for proven public authority source patterns before trying more URLs.",
-    authority_source_candidates_from_repo_patterns: authoritySourceCandidates,
+    source_pattern_files: groundingFiles,
+    source_pattern_instruction: groundingFiles.length > 0
+      ? "If authority source URL commands fail, read or search these repository files to find proven public authority source patterns before trying more URLs -- for this catalog format that means real authority_sources entries in sibling spec.yaml files, not a research-summary.json/manifest.yaml convention this repo may not use. These files are dynamic repo context, not hardcoded sources."
+      : "This section has no sibling spec.yaml records (or research-summary.json/manifest.yaml, where that convention " +
+        "applies) to ground against -- it is genuinely new, not a search-tooling gap. If authority source URL commands " +
+        "keep failing, do not widen the search to a different industry section's files and do not fall back to " +
+        "recalled/plausible-sounding sources. Prefer live, directly-fetched public sources; if none can be retrieved, " +
+        "leave the source list short rather than fabricated.",
+    authority_source_candidates_from_repo_patterns: combinedAuthorityCandidates,
     sibling_spec_exemplar: siblingSpecExemplar,
     repo_quality_contract: repoGuidance,
     total_tracked_files: allFiles.length,
@@ -1891,9 +1990,27 @@ function deriveTargetPathFromSlug(prompt) {
   return `${overlayRoot}/${segments.join("/")}/${specFilename}`;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// A literal path embedded directly in the issue body (as opposed to the
+// "::"-delimited Queue Agent Slug labor-commons uses -- see
+// deriveTargetPathFromSlug) is matched against the repo's own configured
+// catalog.overlay_root when set, not a hardcoded layout. A prior version
+// hardcoded "agents/catalog/industry-overlays/..." here unconditionally; for
+// any repo configured with a different overlay_root (e.g. labor-commons'
+// catalog/naics-overlays) that pattern never matches anything real, so this
+// path silently always fell through. Falls back to the legacy literal only
+// when no overlay_root is configured, to stay compatible with any caller
+// that still relies on the old default.
 function buildIssueBrief(prompt) {
+  const overlayRoot = String(env("AE_CATALOG_OVERLAY_ROOT", "")).replace(/^\/+|\/+$/g, "");
+  const explicitPathPattern = overlayRoot
+    ? new RegExp(`${escapeRegExp(overlayRoot)}/[^\\s\`]+`)
+    : /agents\/catalog\/industry-overlays\/[^\s`]+/;
   const targetPath =
-    prompt.match(/agents\/catalog\/industry-overlays\/[^\s`]+/)?.[0] ??
+    prompt.match(explicitPathPattern)?.[0] ??
     deriveTargetPathFromSlug(prompt) ??
     null;
   const brief = {
@@ -2078,6 +2195,7 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
   const qualityState = buildQualityState(issueBrief);
   const initialContext = await buildInitialContext(worktree, issueBrief);
   qualityState.sourcePatternFiles = normalizeArray(initialContext.source_pattern_files);
+  qualityState.relatedFilePrefix = initialContext.related_file_prefix ?? null;
   process.stdout.write(`\n[lane-coder context]\n${JSON.stringify(summarizeInitialContext(initialContext, issueBrief), null, 2)}\n`);
   const messages = [
     { role: "system", content: systemPrompt() },

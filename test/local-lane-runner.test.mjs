@@ -841,6 +841,177 @@ Use public authoritative source research.
   }
 });
 
+// Regression test for a real incident: the source-pattern-discovery guardrail
+// hardcoded the OLD "agents/catalog/industry-overlays" layout in its
+// suggested search glob. labor-commons (and any repo configured with
+// catalog.overlay_root: catalog/naics-overlays) never had that path, so the
+// suggested search silently matched zero files, the anti-fabrication
+// guardrail never actually grounded anything, and the coder fell back to
+// generating authority sources -- and surrounding boundary/scope content --
+// from training-data recall instead. That produced healthcare-flavored
+// content under unrelated hospitality-and-travel and home-services slugs
+// (labor-commons FINDING-03). This test pins the fix: for the naics-overlays
+// layout, the suggested glob must be scoped to the record's own section, not
+// the stale hardcoded literal.
+test("local lane runner scopes source pattern discovery to the naics-overlays layout, not a stale hardcoded path", async () => {
+  const prompt = `Implement issue #1
+
+## Target Path
+catalog/naics-overlays/hospitality-and-travel/guest-services-specialist/
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        commands: ["curl -sSL https://example.com/nope"],
+        summary: "bad source"
+      },
+      {
+        commands: ["curl -sSL https://ordinary-commercial.test/nope"],
+        summary: "bad source two"
+      },
+      {
+        commands: ["curl -sSL https://www.bls.gov/ooh/computer-and-information-technology/software-developers.htm"],
+        summary: "guess another URL"
+      }
+    ]
+  });
+
+  try {
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        prompt,
+        env: { AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays" },
+        setupWorktree: (worktree) => {
+          const summaryPath = path.join(
+            worktree,
+            "catalog/naics-overlays/hospitality-and-travel/hospitality-analytics-specialist/evaluation/research-summary.json"
+          );
+          fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
+          fs.writeFileSync(summaryPath, JSON.stringify({ source_audit: [] }, null, 2));
+          execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+          execFileSync("git", ["commit", "-m", "add source pattern"], {
+            cwd: worktree,
+            stdio: "ignore",
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "Test",
+              GIT_AUTHOR_EMAIL: "test@example.com",
+              GIT_COMMITTER_NAME: "Test",
+              GIT_COMMITTER_EMAIL: "test@example.com"
+            }
+          });
+        }
+      }),
+      (error) => {
+        assert.match(error.stdout, /source_strategy/);
+        // The suggested glob must be scoped to the record's own section...
+        assert.match(error.stdout, /catalog\/naics-overlays\/hospitality-and-travel\/\*\*\/evaluation\/research-summary\.json/);
+        // ...and must never reference the stale, nonexistent layout.
+        assert.doesNotMatch(error.stdout, /agents\/catalog\/industry-overlays/);
+        return true;
+      }
+    );
+  } finally {
+    server.close();
+  }
+});
+
+// Regression test for the deeper gap an independent review found in the
+// glob-path fix above: labor-commons' catalog/README.md explicitly forbids
+// research-summary.json/manifest.yaml ("those belong to a different, older
+// format this repo does not use"), so collectSourcePatternFiles/
+// collectAuthoritySourceCandidates always return empty for this repo's real
+// catalog -- not due to a path bug, but because those files never exist here
+// at all. The only real, already-vetted grounding data that exists is in
+// sibling spec.yaml files' own authority_sources blocks. This pins that the
+// coder is actually pointed at that real data, not just told (correctly, but
+// unhelpfully) that no research-summary.json/manifest.yaml exists.
+test("local lane runner grounds against sibling spec.yaml authority_sources when no research-summary.json/manifest.yaml exists", async () => {
+  const prompt = `Implement issue #1
+
+## Target Path
+catalog/naics-overlays/hospitality-and-travel/guest-services-specialist/
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl, requests } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        done: true,
+        summary: "no changes"
+      }
+    ]
+  });
+
+  try {
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        prompt,
+        env: { AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays" },
+        setupWorktree: (worktree) => {
+          const siblingSpecPath = path.join(
+            worktree,
+            "catalog/naics-overlays/hospitality-and-travel/reservations-specialist/spec.yaml"
+          );
+          fs.mkdirSync(path.dirname(siblingSpecPath), { recursive: true });
+          fs.writeFileSync(
+            siblingSpecPath,
+            [
+              "metadata:",
+              "  slug: reservations-specialist",
+              "knowledge_baseline:",
+              "  authority_sources:",
+              "  - source_id: ftc-advertising",
+              "    title: FTC advertising and pricing guidance",
+              "    location: https://www.ftc.gov/example-hospitality-guidance",
+              ""
+            ].join("\n")
+          );
+          // Deliberately no research-summary.json/manifest.yaml anywhere --
+          // this repo's catalog/README.md forbids them.
+          execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+          execFileSync("git", ["commit", "-m", "add sibling spec"], {
+            cwd: worktree,
+            stdio: "ignore",
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "Test",
+              GIT_AUTHOR_EMAIL: "test@example.com",
+              GIT_COMMITTER_NAME: "Test",
+              GIT_COMMITTER_EMAIL: "test@example.com"
+            }
+          });
+        }
+      })
+    );
+    const chatRequest = requests.find((request) => request.method === "POST" && request.url === "/api/chat");
+    const startupUserMessage = chatRequest.body.messages.find((message) => message.role === "user");
+    const startupPayload = JSON.parse(startupUserMessage.content);
+    assert.deepEqual(startupPayload.initial_context.authority_source_candidates_from_repo_patterns, [
+      {
+        url: "https://www.ftc.gov/example-hospitality-guidance",
+        source_file: "catalog/naics-overlays/hospitality-and-travel/reservations-specialist/spec.yaml"
+      }
+    ]);
+    // Not the "no siblings exist, do not fabricate" fallback -- real sibling
+    // data was found and should be what the coder is told to go read.
+    assert.match(
+      JSON.stringify(startupPayload.initial_context.required_first_steps),
+      /catalog\/naics-overlays\/hospitality-and-travel\/reservations-specialist\/spec\.yaml/
+    );
+  } finally {
+    server.close();
+  }
+});
+
 test("local lane runner rejects PDF-only source pattern mining", async () => {
   const prompt = `Implement issue #1
 
