@@ -921,6 +921,97 @@ Use public authoritative source research.
   }
 });
 
+// Regression test for the deeper gap an independent review found in the
+// glob-path fix above: labor-commons' catalog/README.md explicitly forbids
+// research-summary.json/manifest.yaml ("those belong to a different, older
+// format this repo does not use"), so collectSourcePatternFiles/
+// collectAuthoritySourceCandidates always return empty for this repo's real
+// catalog -- not due to a path bug, but because those files never exist here
+// at all. The only real, already-vetted grounding data that exists is in
+// sibling spec.yaml files' own authority_sources blocks. This pins that the
+// coder is actually pointed at that real data, not just told (correctly, but
+// unhelpfully) that no research-summary.json/manifest.yaml exists.
+test("local lane runner grounds against sibling spec.yaml authority_sources when no research-summary.json/manifest.yaml exists", async () => {
+  const prompt = `Implement issue #1
+
+## Target Path
+catalog/naics-overlays/hospitality-and-travel/guest-services-specialist/
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl, requests } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        done: true,
+        summary: "no changes"
+      }
+    ]
+  });
+
+  try {
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        prompt,
+        env: { AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays" },
+        setupWorktree: (worktree) => {
+          const siblingSpecPath = path.join(
+            worktree,
+            "catalog/naics-overlays/hospitality-and-travel/reservations-specialist/spec.yaml"
+          );
+          fs.mkdirSync(path.dirname(siblingSpecPath), { recursive: true });
+          fs.writeFileSync(
+            siblingSpecPath,
+            [
+              "metadata:",
+              "  slug: reservations-specialist",
+              "knowledge_baseline:",
+              "  authority_sources:",
+              "  - source_id: ftc-advertising",
+              "    title: FTC advertising and pricing guidance",
+              "    location: https://www.ftc.gov/example-hospitality-guidance",
+              ""
+            ].join("\n")
+          );
+          // Deliberately no research-summary.json/manifest.yaml anywhere --
+          // this repo's catalog/README.md forbids them.
+          execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+          execFileSync("git", ["commit", "-m", "add sibling spec"], {
+            cwd: worktree,
+            stdio: "ignore",
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "Test",
+              GIT_AUTHOR_EMAIL: "test@example.com",
+              GIT_COMMITTER_NAME: "Test",
+              GIT_COMMITTER_EMAIL: "test@example.com"
+            }
+          });
+        }
+      })
+    );
+    const chatRequest = requests.find((request) => request.method === "POST" && request.url === "/api/chat");
+    const startupUserMessage = chatRequest.body.messages.find((message) => message.role === "user");
+    const startupPayload = JSON.parse(startupUserMessage.content);
+    assert.deepEqual(startupPayload.initial_context.authority_source_candidates_from_repo_patterns, [
+      {
+        url: "https://www.ftc.gov/example-hospitality-guidance",
+        source_file: "catalog/naics-overlays/hospitality-and-travel/reservations-specialist/spec.yaml"
+      }
+    ]);
+    // Not the "no siblings exist, do not fabricate" fallback -- real sibling
+    // data was found and should be what the coder is told to go read.
+    assert.match(
+      JSON.stringify(startupPayload.initial_context.required_first_steps),
+      /catalog\/naics-overlays\/hospitality-and-travel\/reservations-specialist\/spec\.yaml/
+    );
+  } finally {
+    server.close();
+  }
+});
+
 test("local lane runner rejects PDF-only source pattern mining", async () => {
   const prompt = `Implement issue #1
 
