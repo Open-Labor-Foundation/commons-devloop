@@ -1655,7 +1655,24 @@ function collectAuthoritySourceCandidates(worktree, sourcePatternFiles) {
 // empty, not because no real grounding data exists, but because it's looking
 // in the wrong place: the real, already-vetted source data lives directly in
 // sibling spec.yaml files' own authority_sources blocks. Read those instead.
+//
+// Opt-in via this repo's own repo.catalog.spec_filename/first_entry_exemplar_key
+// config (see config.mjs / AE_CATALOG_SPEC_FILENAME, AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY)
+// -- the same field collectSiblingSpecExemplar uses to pick a depth/structure
+// exemplar, reused here because it's the same field: whatever this repo calls
+// its authority/reference-source list is both the field worth showing a shape
+// exemplar for AND the field worth mining for real candidate URLs. Returns
+// nothing (the default for every repo) unless both are configured, matching
+// every other sibling-harvesting function in this file -- a prior version
+// hardcoded the "spec.yaml" filename and "authority_sources" field name
+// unconditionally for every repo on this shared engine, which is exactly the
+// class of bug this file's genericization exists to remove.
 function collectSiblingSpecAuthoritySources(worktree, allFiles, targetPath) {
+  const specFilename = String(env("AE_CATALOG_SPEC_FILENAME", "")).trim();
+  const sourceKey = String(env("AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY", "")).trim();
+  if (!specFilename || !sourceKey) {
+    return [];
+  }
   const targetBase = String(targetPath ?? "").replace(/\/+$/, "");
   const relatedPrefix = deriveRelatedFilePrefix(targetPath);
   if (!relatedPrefix) {
@@ -1664,10 +1681,12 @@ function collectSiblingSpecAuthoritySources(worktree, allFiles, targetPath) {
   const limit = Number(env("AE_LOCAL_CODER_SIBLING_SOURCE_CANDIDATE_LIMIT", 8));
   const candidates = [];
   const seen = new Set();
+  const specFilenamePattern = new RegExp(`(^|/)${specFilename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+  const sourceKeyPattern = new RegExp(`^\\s*${sourceKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`, "m");
   const specFiles = allFiles.filter(
     (file) =>
       file.startsWith(`${relatedPrefix}/`) &&
-      /(^|\/)spec\.ya?ml$/.test(file) &&
+      specFilenamePattern.test(file) &&
       !(targetBase && file.startsWith(`${targetBase}/`))
   );
   for (const relativePath of specFiles) {
@@ -1679,7 +1698,7 @@ function collectSiblingSpecAuthoritySources(worktree, allFiles, targetPath) {
       continue;
     }
     const content = fs.readFileSync(filePath, "utf8");
-    const authoritySourcesBlock = extractIndentedBlock(content, /^\s*authority_sources:/m) ?? "";
+    const authoritySourcesBlock = extractIndentedBlock(content, sourceKeyPattern) ?? "";
     for (const url of extractUrls(authoritySourcesBlock).filter(openAuthoritySourceUrl)) {
       if (seen.has(url)) {
         continue;
