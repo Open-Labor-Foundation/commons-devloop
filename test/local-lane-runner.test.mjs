@@ -841,6 +841,86 @@ Use public authoritative source research.
   }
 });
 
+// Regression test for a real incident: the source-pattern-discovery guardrail
+// hardcoded the OLD "agents/catalog/industry-overlays" layout in its
+// suggested search glob. labor-commons (and any repo configured with
+// catalog.overlay_root: catalog/naics-overlays) never had that path, so the
+// suggested search silently matched zero files, the anti-fabrication
+// guardrail never actually grounded anything, and the coder fell back to
+// generating authority sources -- and surrounding boundary/scope content --
+// from training-data recall instead. That produced healthcare-flavored
+// content under unrelated hospitality-and-travel and home-services slugs
+// (labor-commons FINDING-03). This test pins the fix: for the naics-overlays
+// layout, the suggested glob must be scoped to the record's own section, not
+// the stale hardcoded literal.
+test("local lane runner scopes source pattern discovery to the naics-overlays layout, not a stale hardcoded path", async () => {
+  const prompt = `Implement issue #1
+
+## Target Path
+catalog/naics-overlays/hospitality-and-travel/guest-services-specialist/
+
+## Authority Sources
+Use public authoritative source research.
+`;
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      {
+        commands: ["curl -sSL https://example.com/nope"],
+        summary: "bad source"
+      },
+      {
+        commands: ["curl -sSL https://ordinary-commercial.test/nope"],
+        summary: "bad source two"
+      },
+      {
+        commands: ["curl -sSL https://www.bls.gov/ooh/computer-and-information-technology/software-developers.htm"],
+        summary: "guess another URL"
+      }
+    ]
+  });
+
+  try {
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        prompt,
+        env: { AE_CATALOG_OVERLAY_ROOT: "catalog/naics-overlays" },
+        setupWorktree: (worktree) => {
+          const summaryPath = path.join(
+            worktree,
+            "catalog/naics-overlays/hospitality-and-travel/hospitality-analytics-specialist/evaluation/research-summary.json"
+          );
+          fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
+          fs.writeFileSync(summaryPath, JSON.stringify({ source_audit: [] }, null, 2));
+          execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+          execFileSync("git", ["commit", "-m", "add source pattern"], {
+            cwd: worktree,
+            stdio: "ignore",
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "Test",
+              GIT_AUTHOR_EMAIL: "test@example.com",
+              GIT_COMMITTER_NAME: "Test",
+              GIT_COMMITTER_EMAIL: "test@example.com"
+            }
+          });
+        }
+      }),
+      (error) => {
+        assert.match(error.stdout, /source_strategy/);
+        // The suggested glob must be scoped to the record's own section...
+        assert.match(error.stdout, /catalog\/naics-overlays\/hospitality-and-travel\/\*\*\/evaluation\/research-summary\.json/);
+        // ...and must never reference the stale, nonexistent layout.
+        assert.doesNotMatch(error.stdout, /agents\/catalog\/industry-overlays/);
+        return true;
+      }
+    );
+  } finally {
+    server.close();
+  }
+});
+
 test("local lane runner rejects PDF-only source pattern mining", async () => {
   const prompt = `Implement issue #1
 
