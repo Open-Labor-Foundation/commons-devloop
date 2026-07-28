@@ -443,6 +443,19 @@ function normalizeConfig(parsed, { env = process.env } = {}) {
       : path.join(repo.workspace_dir, ".github", "copilot-instructions.md")
   };
 
+  // Fully opt-in, repo-supplied quality gate: the engine has no built-in
+  // notion of what "authority research" or a "source" means for any given
+  // repo. A repo that wants this behavior supplies its own trigger keywords
+  // and required-source count; absent (the default for every repo), the
+  // gate never engages. See scripts/local-lane-runner.mjs's
+  // requiresAuthorityResearch().
+  const qualityGates = {
+    authority_research: {
+      trigger_keywords: asStringArray(parsed.quality_gates?.authority_research?.trigger_keywords),
+      min_sources: asInteger(parsed.quality_gates?.authority_research?.min_sources, 6, 0)
+    }
+  };
+
   const runnerManager = {
     enabled: asBoolean(parsed.runner_manager?.enabled, true),
     scope: String(parsed.runner_manager?.scope ?? "repo"),
@@ -536,6 +549,7 @@ function normalizeConfig(parsed, { env = process.env } = {}) {
     models,
     validation,
     reviewer,
+    quality_gates: qualityGates,
     runner_manager: runnerManager,
     pr_manager: prManager,
     monitor,

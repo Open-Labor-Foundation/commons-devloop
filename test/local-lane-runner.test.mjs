@@ -118,6 +118,14 @@ async function runRunner({
       AE_LOCAL_MODEL_HEALTH_URL: `${baseUrl}/api/tags`,
       AE_LOCAL_MODEL_AUTO_PULL: autoPull ? "1" : "0",
       AE_LOCAL_CODER_CREATE_PR: "0",
+      // Opt-in quality-gate/catalog config (see config.mjs, fix/repo-agnostic-engine):
+      // the engine has no built-in notion of these; this test file's fixtures were
+      // written against the repo's pre-genericization always-on defaults, so supply
+      // the equivalent config here as the shared test baseline. Individual tests
+      // override via `env` where they need something different.
+      AE_AUTHORITY_RESEARCH_KEYWORDS: "authority,authoritative,source,research,owasp,cfr,nist,cisa",
+      AE_AUTHORITY_RESEARCH_MIN_SOURCES: "6",
+      AE_CATALOG_SOURCE_PATTERN_FILENAMES: "evaluation/research-summary.json,manifest.yaml",
       ...env
     }
   });

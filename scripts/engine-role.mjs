@@ -1236,14 +1236,25 @@ function buildLocalLaneEnv(config, stateDir, baseEnv, launch, item, issue, workt
     AE_WORKTREE: worktree,
     AE_ISSUE_NUMBER: String(item.number),
     AE_ISSUE_TITLE: issue.title ?? "",
+    AE_ISSUE_REQUIRED_PREFIX: String(config.issue_source.required_issue_prefix ?? ""),
     AE_BRANCH_NAME: item.branch,
     AE_PR_BASE_BRANCH: config.branches.pr_base_branch,
-    // Repo-specific catalog layout, used to derive a spec.yaml target_path from
-    // an issue's Queue Agent Slug when the issue body carries no filesystem
-    // path. Empty for repos that don't use a catalog-overlay layout.
+    // Repo-specific catalog layout, used to derive a target_path from an
+    // issue's Queue Agent Slug when the issue body carries no filesystem
+    // path, and to drive the optional sibling-exemplar/source-pattern
+    // context-harvesting in local-lane-runner.mjs. Empty for repos that
+    // don't use a catalog-overlay layout -- every one of these features is
+    // dead code for such repos, not just unused config.
     AE_CATALOG_OVERLAY_ROOT: String(config.repo.catalog?.overlay_root ?? ""),
     AE_CATALOG_SPEC_FILENAME: String(config.repo.catalog?.spec_filename ?? ""),
     AE_CATALOG_SLUG_PREFIX: String(config.repo.catalog?.slug_prefix ?? ""),
+    AE_CATALOG_EXEMPLAR_KEYS: (Array.isArray(config.repo.catalog?.exemplar_keys) ? config.repo.catalog.exemplar_keys : []).join(","),
+    AE_CATALOG_FIRST_ENTRY_EXEMPLAR_KEY: String(config.repo.catalog?.first_entry_exemplar_key ?? ""),
+    AE_CATALOG_SOURCE_PATTERN_FILENAMES: (Array.isArray(config.repo.catalog?.source_pattern_filenames) ? config.repo.catalog.source_pattern_filenames : []).join(","),
+    // Opt-in quality gate -- see config.mjs's quality_gates.authority_research
+    // comment. Empty keywords means the gate never engages.
+    AE_AUTHORITY_RESEARCH_KEYWORDS: (Array.isArray(config.quality_gates?.authority_research?.trigger_keywords) ? config.quality_gates.authority_research.trigger_keywords : []).join(","),
+    AE_AUTHORITY_RESEARCH_MIN_SOURCES: String(config.quality_gates?.authority_research?.min_sources ?? 6),
     AE_ISSUE_PROMPT_PATH: promptPath,
     AE_REMEDIATION_PAYLOAD_PATH: remediationPayloadPath ?? "",
     AE_LOCAL_MODEL_SERVICE: launch.runtimeService ?? "",
@@ -2043,8 +2054,8 @@ async function runReviewerOpenAiCompatibleAsync({ worktree, baseBranch, model, r
     `Today's actual date is ${new Date().toISOString().slice(0, 10)} (UTC). Use this as "today" for any date reasoning. Do NOT rely on your own notion of the current date, and do NOT flag a date that is today or earlier as a "future date" error.`,
     reviewPrompt.trim(),
     "Scope of your review:",
-    "- Schema shape, required fields, field placement, date-field validity, URL reachability, and every COUNT/LENGTH THRESHOLD (minimum number of authority sources, minimum boundary length, etc.) are ALREADY checked mechanically and authoritatively by the repo's own validation script. Do NOT report any of these -- you cannot see that script's result and you will produce false positives. Never claim a field/section is \"extraneous\" or \"not in the schema\" (the contract shape is a minimum, not exhaustive), and never flag that there are \"too few\" sources or that something is \"below the required minimum\" -- counts are the validator's job, not yours.",
-    "- Review ONLY semantic content quality that a mechanical check cannot judge: is the specialty_boundary genuinely specific to this exact industry and lane (not generic); are the authority sources that ARE cited topically appropriate and real for this lane; is anything stated factually wrong or internally contradictory; is the scope coherent. Judge the QUALITY of what is present, never the QUANTITY.",
+    "- Structural/mechanical checks (schema shape, required fields, field placement, date-field validity, URL reachability, count/length thresholds, etc.) are already checked mechanically and authoritatively by the repo's own validation script, if it has one. Do NOT report any of these -- you cannot see that script's result and you will produce false positives. Never claim a field/section is \"extraneous\" or \"not in the schema\" (a contract shape is a minimum, not exhaustive), and never flag something as \"too few\" or \"below the required minimum\" -- counts are the validator's job, not yours.",
+    "- Review ONLY semantic content quality that a mechanical check cannot judge: is the domain-specific content genuinely specific to this task's context (not generic boilerplate); are any cited sources/references topically appropriate and real; is anything stated factually wrong or internally contradictory; is the scope coherent. Judge the QUALITY of what is present, never the QUANTITY.",
     "Output requirements:",
     "- Return concise markdown suitable for a GitHub pull request comment.",
     "- Only REQUEST_CHANGES for a genuine semantic-content problem of the kind above. If the content is topically sound, APPROVE even if you would have written it differently.",
