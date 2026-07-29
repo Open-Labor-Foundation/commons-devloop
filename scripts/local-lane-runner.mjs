@@ -916,7 +916,15 @@ function buildQualityState(issueBrief = {}) {
     // Sticky: once the iteration budget runs low, waive the authority-source
     // minimum for the rest of this run rather than flip-flopping the
     // requirement turn to turn.
-    authorityResearchWaived: false
+    authorityResearchWaived: false,
+    // Every path successfully read so far this run -- see madeProgress below,
+    // which uses this to stop counting a re-read of an already-seen file as
+    // progress. Observed live with GLM-5.2: a model re-orienting by
+    // re-reading the same 3-4 sibling files turn after turn, never writing,
+    // never tripping the no-progress-turn counter because each individual
+    // read still "succeeded", burning the full iteration budget with nothing
+    // written and no forced-final-write ever triggering.
+    readFilePaths: new Set()
   };
 }
 
@@ -2379,7 +2387,23 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
     }
     const status = await gitStatus(worktree);
     const rejectedNoWriteAction = !actionWritesRepository(action) && observations.some((observation) => observation.rejected);
-    const madeProgress = Boolean(status) || observations.some(observationShowsProgress);
+    // A read_file observation only counts as progress the first time a given
+    // path is read this run -- re-reading a file already seen is not new
+    // information, and treating it as progress lets a coder that's stuck
+    // re-orienting (reading the same siblings turn after turn instead of
+    // writing) run out the entire iteration budget without ever tripping the
+    // no-progress-turn counter that gates the forced-final-write escape hatch.
+    const madeProgress = Boolean(status) || observations.some((observation) => {
+      if (!observationShowsProgress(observation)) {
+        return false;
+      }
+      if (observation.type === "read_file" && observation.path) {
+        const alreadySeen = qualityState.readFilePaths.has(observation.path);
+        qualityState.readFilePaths.add(observation.path);
+        return !alreadySeen;
+      }
+      return true;
+    });
     consecutiveNoProgressTurns = madeProgress ? 0 : consecutiveNoProgressTurns + 1;
 
     if (consecutiveNoProgressTurns >= maxNoProgressTurns) {
