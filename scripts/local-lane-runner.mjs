@@ -2406,7 +2406,21 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
     });
     consecutiveNoProgressTurns = madeProgress ? 0 : consecutiveNoProgressTurns + 1;
 
-    if (consecutiveNoProgressTurns >= maxNoProgressTurns) {
+    const iterationsRemaining = maxIterations - iteration;
+    // Independent of the no-progress-turn counter above: observed live with
+    // GLM-5.2 that a run can look "productive" every single turn (each
+    // iteration mixes in at least one file it hasn't read yet, alongside
+    // heavy re-reads of the same handful of files) and never once trip
+    // consecutiveNoProgressTurns, while still never converging on a write --
+    // the model just keeps finding a new-enough excuse to research more,
+    // right up to the iteration cap. Force the same escape hatch once the
+    // budget is genuinely running out and nothing has been written yet,
+    // regardless of whether recent turns individually looked productive.
+    const budgetExhaustedWithNoWrite = !status &&
+      iterationsRemaining <= forceWriteIterationsRemaining &&
+      !forcedFinalWriteAttempted;
+
+    if (consecutiveNoProgressTurns >= maxNoProgressTurns || budgetExhaustedWithNoWrite) {
       // Before giving up, if nothing has been written to the worktree yet, spend
       // one final turn forcing a write with whatever context is already gathered.
       // The common failure otherwise is a run that researches (and gets research
@@ -2451,7 +2465,6 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
           : action)
       });
     }
-    const iterationsRemaining = maxIterations - iteration;
     const authorityResearchMet = qualityState.authorityResearchEvidence.length >=
       Number(env("AE_AUTHORITY_RESEARCH_MIN_SOURCES", 6));
     const forcedByBudget = !authorityResearchMet && !status && iterationsRemaining <= forceWriteIterationsRemaining;

@@ -1556,13 +1556,16 @@ Use public authoritative source research.
 
     // With AE_LOCAL_CODER_MAX_ITERATIONS=3 and
     // AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING=2, only 2 iterations
-    // remain right after iteration 1 -- so the forced-write instruction
-    // should already be in the request sent for iteration 2.
+    // remain right after iteration 1 with nothing written yet -- budgetExhaustedWithNoWrite
+    // fires immediately (not just a soft nudge waiting for the model to comply
+    // on its own initiative), so the hard forced_final_write instruction is
+    // already in the request sent for iteration 2.
     const secondTurnMessages = requests
       .filter((request) => request.body?.messages)
       .at(1).body.messages;
     const lastUserMessage = [...secondTurnMessages].reverse().find((message) => message.role === "user");
-    assert.match(lastUserMessage.content, /not enough of the iteration budget left/);
+    assert.match(lastUserMessage.content, /"forced_final_write":true/);
+    assert.match(lastUserMessage.content, /out of research turns and have written nothing/);
   } finally {
     server.close();
   }
@@ -1986,6 +1989,64 @@ test("local lane runner treats a repeated read of an already-seen file as no pro
     // Confirms it forced on the 3rd iteration (2 repeated reads after the
     // first genuine one), not by exhausting all 10 available iterations.
     assert.equal(requests.filter((r) => r.method === "POST" && r.url === "/api/chat").length, 4);
+  } finally {
+    server.close();
+  }
+});
+
+// Regression test for the exact production pattern that survived the first
+// fix above: a run where EVERY turn mixes in at least one genuinely-new
+// read alongside heavy repeats of the same file, so consecutiveNoProgressTurns
+// never trips (each turn looks "productive" in isolation) -- yet the model
+// still never converges on a write. This pins the independent, budget-based
+// trigger (budgetExhaustedWithNoWrite): once the iteration budget is
+// genuinely running low and nothing has been written, force a write
+// regardless of whether recent turns individually looked productive.
+test("local lane runner forces a write when every turn looks productive but nothing ever gets written", async () => {
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { read_files: ["README.md", "sibling-a.txt"], summary: "iteration 1: reads README + a new sibling" },
+      { read_files: ["README.md", "sibling-b.txt"], summary: "iteration 2: re-reads README, reads a different new sibling" },
+      { read_files: ["README.md", "sibling-c.txt"], summary: "iteration 3: same pattern, another new sibling" },
+      {
+        write_files: [{ path: "answer.txt", content: "written once the budget forced it\n" }],
+        done: true,
+        summary: "forced write"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      env: {
+        AE_LOCAL_CODER_MAX_ITERATIONS: "5",
+        AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING: "2"
+      },
+      setupWorktree: (worktree) => {
+        fs.writeFileSync(path.join(worktree, "sibling-a.txt"), "a\n");
+        fs.writeFileSync(path.join(worktree, "sibling-b.txt"), "b\n");
+        fs.writeFileSync(path.join(worktree, "sibling-c.txt"), "c\n");
+        execFileSync("git", ["add", "."], { cwd: worktree, stdio: "ignore" });
+        execFileSync("git", ["commit", "-m", "add siblings"], {
+          cwd: worktree,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test",
+            GIT_AUTHOR_EMAIL: "test@example.com",
+            GIT_COMMITTER_NAME: "Test",
+            GIT_COMMITTER_EMAIL: "test@example.com"
+          }
+        });
+      }
+    });
+    assert.match(result.stdout, /lane-coder forced-final-write/);
+    assert.equal(
+      fs.readFileSync(path.join(result.worktree, "answer.txt"), "utf8"),
+      "written once the budget forced it\n"
+    );
   } finally {
     server.close();
   }
