@@ -1944,3 +1944,49 @@ test("local lane runner retries a truncated reasoning-only response instead of t
     server.close();
   }
 });
+
+// Regression test for a real incident: GLM-5.2, stuck re-orienting instead
+// of committing to a write, re-read the same 3-4 sibling files turn after
+// turn for the full 20-iteration budget and produced nothing -- ten times in
+// a row across dispatcher restarts, each one a real, paid API run. The root
+// cause: observationShowsProgress counted every successful read_file as
+// progress regardless of whether that exact path had already been read
+// earlier in the run, so the no-progress-turn counter (which is what gates
+// the forced-final-write escape hatch) never accumulated. This pins that a
+// *repeated* read of an already-seen path does not reset the counter, so the
+// forced write actually fires instead of silently burning the whole budget.
+test("local lane runner treats a repeated read of an already-seen file as no progress", async () => {
+  const { server, baseUrl, requests } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { read_files: ["README.md"], summary: "iteration 1: first read, genuinely new" },
+      { read_files: ["README.md"], summary: "iteration 2: re-reads the same file again" },
+      { read_files: ["README.md"], summary: "iteration 3: re-reads the same file a third time" },
+      {
+        write_files: [{ path: "answer.txt", content: "written after the forced write kicked in\n" }],
+        done: true,
+        summary: "forced write after repeated no-progress re-reads"
+      }
+    ]
+  });
+
+  try {
+    const result = await runRunner({
+      baseUrl,
+      env: {
+        AE_LOCAL_CODER_MAX_NO_PROGRESS_TURNS: "2",
+        AE_LOCAL_CODER_MAX_ITERATIONS: "10"
+      }
+    });
+    assert.match(result.stdout, /lane-coder forced-final-write/);
+    assert.equal(
+      fs.readFileSync(path.join(result.worktree, "answer.txt"), "utf8"),
+      "written after the forced write kicked in\n"
+    );
+    // Confirms it forced on the 3rd iteration (2 repeated reads after the
+    // first genuine one), not by exhausting all 10 available iterations.
+    assert.equal(requests.filter((r) => r.method === "POST" && r.url === "/api/chat").length, 4);
+  } finally {
+    server.close();
+  }
+});
