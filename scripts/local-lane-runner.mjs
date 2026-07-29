@@ -2364,6 +2364,31 @@ async function runLaneCoder({ provider, model, endpoint, baseUrl, worktree, prom
         done: false
       }, null, 2)}\n`);
       process.stdout.write(`\n[lane-coder observations]\n${JSON.stringify(observations, null, 2)}\n`);
+    } else if (forcedFinalWriteAttempted && !actionWritesRepository(action) && action.done !== true) {
+      // The one-shot forced-final-write instruction (pushed below, "stop all
+      // reads/searches/commands, write now") is advisory text in the prompt,
+      // not a hard constraint on what the model can respond with. Observed
+      // live: GLM-5.2 received it and, on the very next turn, went right back
+      // to reading sibling files instead of writing -- the harness correctly
+      // detected the stuck state and asked, but nothing stopped the model
+      // from just declining. From here on this run, do not execute another
+      // non-write action at all; reject it outright and repeat the demand
+      // every turn until it either writes or the run ends, rather than
+      // silently letting "iteration ran out of budget" quietly re-happen one
+      // nudge later.
+      repeatedNoOpAction = true;
+      observations = [{
+        type: "forced_write_required",
+        rejected: true,
+        instruction: "A forced-write instruction was already issued and ignored. No further reads, searches, or commands will be executed for the rest of this run. Return a write_files action for the target path now."
+      }];
+      process.stdout.write(`\n[lane-coder action]\n${JSON.stringify({
+        forcedWriteRejected: true,
+        writes: 0,
+        unifiedDiff: false,
+        done: false
+      }, null, 2)}\n`);
+      process.stdout.write(`\n[lane-coder observations]\n${JSON.stringify(observations, null, 2)}\n`);
     } else if (!actionWritesRepository(action) && action.done !== true && noOpActionFingerprints.has(fingerprint)) {
       repeatedNoOpAction = true;
       observations = [{
