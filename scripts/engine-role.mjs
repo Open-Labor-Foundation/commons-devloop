@@ -2079,7 +2079,13 @@ async function runReviewerOpenAiCompatibleAsync({ worktree, baseBranch, model, r
       model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,
-      max_tokens: 4000
+      // 8000, not 4000: a reasoning model (see local-lane-runner.mjs's
+      // chatWithLmStudio for the same gotcha on the coder side) can spend a
+      // meaningful chunk of the budget on message.reasoning before ever
+      // reaching message.content, and a real review prompt for a 15-20KB
+      // spec.yaml diff needs headroom beyond the smaller budget this
+      // started with.
+      max_tokens: 8000
     })
   });
   const text = await response.text();
@@ -2095,9 +2101,17 @@ async function runReviewerOpenAiCompatibleAsync({ worktree, baseBranch, model, r
     fs.appendFileSync(logPath, `\n[response was not valid JSON]\n${text.slice(0, 2000)}\n`);
     throw new Error("openai-compatible review response was not valid JSON");
   }
-  const output = String(body?.choices?.[0]?.message?.content ?? "").trim();
+  const choice = body?.choices?.[0];
+  const output = String(choice?.message?.content ?? "").trim();
   fs.appendFileSync(logPath, `\n${output}\n`);
   if (!output) {
+    if (choice?.finish_reason === "length" && choice?.message?.reasoning) {
+      throw new Error(
+        `openai-compatible review truncated (finish_reason=length, empty content, ` +
+        `${String(choice.message.reasoning).length} reasoning chars) -- the reasoning phase alone ` +
+        "consumed the token budget before any review content was produced"
+      );
+    }
     throw new Error("openai-compatible review returned an empty response");
   }
   return output;

@@ -143,7 +143,11 @@ models:
       auto_pull: false
   reviewer:
     provider: openai_compatible
-    name: deepseek-ai/DeepSeek-V3.2
+    # Matches the dispatcher primary lane: the only model confirmed live
+    # under the current Featherless key (deepseek-ai/DeepSeek-V3.2 was never
+    # re-verified after the key rotation and may not even be reachable on
+    # the current plan).
+    name: zai-org/GLM-5.2
     reasoning_effort: medium
     runtime_endpoint: https://api.featherless.ai/v1
     api_key_env: FEATHERLESS_REVIEWER_API_KEY
@@ -206,12 +210,17 @@ runner_manager:
   dry_run: true
 
 pr_manager:
-  # Human-gated by default: the pipeline creates and validates PRs against
-  # labor-commons main, but does NOT auto-merge. Flip pr_manager.enabled +
-  # safety.auto_merge to true to enable fully-autonomous merge once you're
-  # confident in the generation quality (see the 2026-07 remediation: the
-  # pipeline now produces catalog-quality specs, but autonomy stays opt-in).
-  enabled: false
+  # Flipped to autonomous 2026-07-28: PR #643 (the first real GLM-5.2
+  # regeneration) verified independently -- both source-coherence and
+  # domain-coherence pass, manual content read confirmed correct
+  # industry-specific boundary text and correctly-swapped regulator
+  # sources. Real merge criteria (see pr-readiness.mjs's
+  # evaluatePullRequestReadiness/mergeAllowedForPr): local validator
+  # success, reviewer success-or-skipped, safety.auto_merge true, and no
+  # required auto_merge_label. This field itself isn't read by any gate --
+  # roles.enabled['pr-manager'] and safety.auto_merge below are the real
+  # switches -- kept true here for what it documents, not what it enforces.
+  enabled: true
   interval_seconds: 10
   merge_concurrency: 1
   auto_merge_label:
@@ -223,7 +232,7 @@ monitor:
 
 safety:
   pr_only: true
-  auto_merge: false
+  auto_merge: true
   protected_branches:
     - main
   protected_paths: []
@@ -243,16 +252,19 @@ roles:
     autonomous: true
     dispatcher: true
     validator: true
-    # Disabled for this run: the available Featherless capacity is fully
-    # consumed by a single concurrent GLM-5.2 request -- there is no
-    # separate budget for a second, independently-polling process (reviewer
-    # runs as its own container, on its own poll loop, and could fire a
-    # review call at the same moment dispatcher's coder subprocess is mid-
-    # generation). dispatcher is the only role that may call Featherless
-    # while this constraint holds. Re-enable once capacity is no longer
-    # shared this tightly. PRs are reviewed manually in the interim (already
-    # the plan, since pr_manager stays disabled too).
-    reviewer: false
+    # Re-enabled 2026-07-28: initially disabled here over a (mistaken)
+    # concern that a concurrent reviewer call would starve dispatcher's
+    # single available Featherless slot. That's not actually a hard block --
+    # isRetryableChatError already treats HTTP 429 as retryable with
+    # exponential backoff (up to 6 attempts), so an occasional capacity
+    # collision between dispatcher's coder subprocess and reviewer's
+    # independent poll loop costs a delay, not a failure. More importantly,
+    # reviewer being "skipped" was never actually gating merge readiness
+    # either way (see pr-readiness.mjs: skipped reviewer state is treated
+    # the same as success) -- so disabling it didn't even buy the intended
+    # safety margin, it just meant no real content-quality check ran before
+    # merge, which defeats the actual purpose of having a reviewer role.
+    reviewer: true
     runner-manager: true
     pr-manager: true
     monitor: true
