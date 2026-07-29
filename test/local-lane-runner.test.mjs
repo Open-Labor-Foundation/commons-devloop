@@ -2051,3 +2051,44 @@ test("local lane runner forces a write when every turn looks productive but noth
     server.close();
   }
 });
+
+// Regression test for a real incident: after the forced-final-write
+// instruction fires, GLM-5.2 ignored it and went right back to reading
+// sibling files on the very next turn -- the harness had asked once, gotten
+// declined, and had no further escalation, so the run just burned out the
+// rest of its iteration budget the same as before the fix above. Pins that
+// once forced, any further non-write action is rejected outright (not
+// executed) rather than asked for a second time, and the run fails cleanly
+// via the existing no-progress hard-stop instead of silently running out
+// the clock with nothing written.
+test("local lane runner rejects further research outright once a forced write has already been ignored", async () => {
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { read_files: ["README.md"], summary: "iteration 1: triggers the forced-write threshold immediately" },
+      { read_files: ["package.json"], summary: "iteration 2: ignores the forced-write instruction, keeps reading" },
+      { read_files: ["README.md"], summary: "iteration 3: ignores it again" }
+    ]
+  });
+
+  try {
+    await assert.rejects(
+      () => runRunner({
+        baseUrl,
+        env: {
+          AE_LOCAL_CODER_MAX_ITERATIONS: "6",
+          AE_LOCAL_CODER_FORCE_WRITE_ITERATIONS_REMAINING: "5",
+          AE_LOCAL_CODER_MAX_NO_PROGRESS_TURNS: "2"
+        }
+      }),
+      (error) => {
+        assert.match(error.stdout, /lane-coder forced-final-write/);
+        assert.match(error.stdout, /forcedWriteRejected/);
+        assert.match(error.message, /Lane coder stopped after 2 consecutive no-progress turns/);
+        return true;
+      }
+    );
+  } finally {
+    server.close();
+  }
+});
