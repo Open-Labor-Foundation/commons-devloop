@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+# The job only checks out and runs npm ci / npm test.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
