@@ -112,12 +112,14 @@ function looksLikeHtml(text) {
 // hard character cut, not after.
 function htmlToCleanText(raw) {
   const text = String(raw ?? "");
-  // \s* before the closing '>' -- browsers accept `</script >` (whitespace
-  // before the '>') as a valid end tag; the exact-`</script>` version CodeQL
-  // flagged (js/bad-tag-filter) would let that variant survive stripping.
+  // [^>]* before the closing '>' -- an HTML end tag tolerates *anything*
+  // other than '>' between the tag name and the close (real tokenizers
+  // don't validate end-tag "attributes"), not just whitespace. The
+  // exact-`</script>` version CodeQL flagged (js/bad-tag-filter) missed
+  // `</script >`; a whitespace-only fix still misses `</script foo="bar">`.
   const withoutScripts = text
-    .replace(/<script[\s\S]*?<\/script\s*>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style\s*>/gi, " ");
+    .replace(/<script[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style[^>]*>/gi, " ");
   const title = withoutScripts.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
   const description = withoutScripts.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["'][^>]*>/i)?.[1] ??
     withoutScripts.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["'][^>]*>/i)?.[1];

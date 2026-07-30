@@ -1411,12 +1411,15 @@ test("local lane runner never falls back to raw markup when an HTML fetch has no
   }
 });
 
-test("local lane runner strips a </script> end tag even with whitespace before the '>' (CodeQL js/bad-tag-filter regression)", async () => {
-  // Browsers accept `</script >` as a valid end tag. The exact-`</script>`
-  // regex this used to be would leave the "closed" script body (and the
-  // now-orphaned end-tag text) in the cleaned output.
+test("local lane runner strips a </script> end tag even with junk before the '>' (CodeQL js/bad-tag-filter regression)", async () => {
+  // An HTML end tag tolerates *anything* other than '>' between the tag
+  // name and the close -- real tokenizers don't validate end-tag
+  // "attributes". CodeQL's own adversarial example for this rule is a tab,
+  // a newline, and arbitrary text (`</script\t\n bar>`); a whitespace-only
+  // fix (`\s*`) still misses that. Uses printf's own \t/\n escape handling
+  // to embed a literal tab and newline in the fetched page.
   const fetchCommand = "printf '<!DOCTYPE html><html><head><title>Test Standard</title></head>" +
-    "<body><script >var x = \"SCRIPT_BODY_SHOULD_NOT_APPEAR\";</script ><p>REAL_BODY_MARKER real content.</p></body></html>' " +
+    "<body><script>var x = \"SCRIPT_BODY_SHOULD_NOT_APPEAR\";</script\\t\\n bar><p>REAL_BODY_MARKER real content.</p></body></html>' " +
     "> page.html && curl -sSL \"file://$(pwd)/page.html\"";
 
   const { server, baseUrl } = await startOllamaStub({
