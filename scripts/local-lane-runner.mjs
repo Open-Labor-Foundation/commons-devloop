@@ -112,18 +112,28 @@ function looksLikeHtml(text) {
 // hard character cut, not after.
 function htmlToCleanText(raw) {
   const text = String(raw ?? "");
+  // \s* before the closing '>' -- browsers accept `</script >` (whitespace
+  // before the '>') as a valid end tag; the exact-`</script>` version CodeQL
+  // flagged (js/bad-tag-filter) would let that variant survive stripping.
   const withoutScripts = text
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, " ");
   const title = withoutScripts.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
   const description = withoutScripts.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["'][^>]*>/i)?.[1] ??
     withoutScripts.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["'][^>]*>/i)?.[1];
+  // Single pass over the four entities, not four sequential .replace() calls
+  // -- CodeQL flagged the sequential form (js/double-escaping): unescaping
+  // &amp; -> '&' before &quot;/&#39; run can turn an intentionally
+  // double-escaped source string (e.g. literal text "&amp;quot;", meaning
+  // the author wanted to display the four characters &quot;) into '&quot;'
+  // and then, on the later .replace, all the way into a literal '"' --
+  // silently changing meaning. One combined match+replacer can't do that
+  // because each character of input is only ever considered once.
+  const ENTITY_PATTERN = /&nbsp;|&amp;|&quot;|&#39;/gi;
+  const ENTITY_REPLACEMENTS = { "&nbsp;": " ", "&amp;": "&", "&quot;": "\"", "&#39;": "'" };
   const body = withoutScripts
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, "\"")
-    .replace(/&#39;/gi, "'")
+    .replace(ENTITY_PATTERN, (entity) => ENTITY_REPLACEMENTS[entity.toLowerCase()])
     .replace(/\s+/g, " ")
     .trim();
   return [

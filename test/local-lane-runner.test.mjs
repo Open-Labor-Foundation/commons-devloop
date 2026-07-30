@@ -1411,6 +1411,67 @@ test("local lane runner never falls back to raw markup when an HTML fetch has no
   }
 });
 
+test("local lane runner strips a </script> end tag even with whitespace before the '>' (CodeQL js/bad-tag-filter regression)", async () => {
+  // Browsers accept `</script >` as a valid end tag. The exact-`</script>`
+  // regex this used to be would leave the "closed" script body (and the
+  // now-orphaned end-tag text) in the cleaned output.
+  const fetchCommand = "printf '<!DOCTYPE html><html><head><title>Test Standard</title></head>" +
+    "<body><script >var x = \"SCRIPT_BODY_SHOULD_NOT_APPEAR\";</script ><p>REAL_BODY_MARKER real content.</p></body></html>' " +
+    "> page.html && curl -sSL \"file://$(pwd)/page.html\"";
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { commands: [fetchCommand], summary: "fetched page" },
+      { write_files: [{ path: "answer.txt", content: "done\n" }], done: true, summary: "done" }
+    ]
+  });
+
+  try {
+    const result = await runRunner({ baseUrl });
+    // Check the observation's own stdout field, not the whole transcript --
+    // the model's *own* echoed command legitimately contains the literal
+    // SCRIPT_BODY_SHOULD_NOT_APPEAR text elsewhere (it's part of the shell
+    // command that fetched the page), so asserting against the whole log
+    // would false-fail regardless of whether the cleaning fix works.
+    const observationsBlock = result.stdout.split("[lane-coder observations]")[1].split("[lane-coder")[0];
+    const observation = JSON.parse(observationsBlock.trim())[0];
+    assert.match(observation.stdout, /REAL_BODY_MARKER/);
+    assert.doesNotMatch(observation.stdout, /SCRIPT_BODY_SHOULD_NOT_APPEAR/);
+  } finally {
+    server.close();
+  }
+});
+
+test("local lane runner does not double-unescape a literal '&quot;' in page text into a '\"' (CodeQL js/double-escaping regression)", async () => {
+  // "&amp;quot;" is what you get when the four literal characters &quot;
+  // (e.g. a page showing HTML-escaping syntax as an example) are themselves
+  // HTML-escaped once. Unescaping &amp; -> '&' in a separate pass BEFORE
+  // &quot; -> '"' runs turns that back into &quot; and then, incorrectly,
+  // all the way into a literal '"' -- changing what the source text said.
+  const fetchCommand = "printf '<!DOCTYPE html><html><head><title>Test Standard</title></head>" +
+    "<body><p>REAL_BODY_MARKER the literal text is &amp;quot; not a quote.</p></body></html>' " +
+    "> page.html && curl -sSL \"file://$(pwd)/page.html\"";
+
+  const { server, baseUrl } = await startOllamaStub({
+    models: ["qwen2.5-coder:7b"],
+    responses: [
+      { commands: [fetchCommand], summary: "fetched page" },
+      { write_files: [{ path: "answer.txt", content: "done\n" }], done: true, summary: "done" }
+    ]
+  });
+
+  try {
+    const result = await runRunner({ baseUrl });
+    const observationsBlock = result.stdout.split("[lane-coder observations]")[1].split("[lane-coder")[0];
+    const observation = JSON.parse(observationsBlock.trim())[0];
+    assert.match(observation.stdout, /&quot; not a quote/);
+    assert.doesNotMatch(observation.stdout, /the literal text is " not a quote/);
+  } finally {
+    server.close();
+  }
+});
+
 test("local lane runner treats a grep-piped HTML fragment as HTML even when it doesn't start with <html>", async () => {
   // Mirrors what was observed live: the model pipes curl through its own
   // grep, and for a minified single-line page grep's "matching line" can be
