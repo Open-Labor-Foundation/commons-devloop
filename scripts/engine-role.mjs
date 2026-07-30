@@ -54,6 +54,7 @@ import {
   runCommand,
   runCommandToFile,
   safeSlug,
+  shellQuote,
   syncCodexSessionHistory,
   writeJsonFile
 } from "./lib/runtime.mjs";
@@ -2421,7 +2422,7 @@ function runRunnerManagerRole(config, stateDir) {
     dockerAvailable = true;
     try {
       const raw = runCommand(
-        `docker ps --format '{{json .}}' --filter name=${JSON.stringify(config.runner_manager.container_prefix)}`
+        `docker ps --format '{{json .}}' --filter name=${shellQuote(config.runner_manager.container_prefix)}`
       );
       containers = raw
         .split("\n")

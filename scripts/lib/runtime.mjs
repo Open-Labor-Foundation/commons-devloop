@@ -15,6 +15,18 @@ const GIT_CONFIG_LOCK_RETRY_PATTERNS = [
   "unable to update local ref"
 ];
 
+// Every call site in this file that builds a shell command string was using
+// shellQuote() to "quote" an interpolated value -- CodeQL flagged this
+// (js/shell-command-injection-from-environment) because JSON escaping rules
+// don't match POSIX shell escaping rules. Some of these values (remote URLs,
+// branch/ref names) originate from PR data on forks, which is attacker-
+// influenced. Standard POSIX single-quote escaping: wrap in '...', and
+// replace any embedded ' with '\'' (close quote, escaped literal quote,
+// reopen quote).
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 export function runCommand(command, options = {}) {
   return execSync(command, {
     cwd: options.cwd,
@@ -26,7 +38,7 @@ export function runCommand(command, options = {}) {
 }
 
 export function ensureSafeGitDirectory(repoDir) {
-  runCommand(`git config --global --add safe.directory ${JSON.stringify(repoDir)}`);
+  runCommand(`git config --global --add safe.directory ${shellQuote(repoDir)}`);
 }
 
 export function ensureGitHubGitAuth() {
@@ -358,16 +370,16 @@ function ensureGitRemote(repoDir, remote) {
   }
 
   try {
-    const currentUrl = runCommand(`git remote get-url ${JSON.stringify(remote.name)}`, { cwd: repoDir });
+    const currentUrl = runCommand(`git remote get-url ${shellQuote(remote.name)}`, { cwd: repoDir });
     if (currentUrl !== remote.url) {
       runCommand(
-        `git remote set-url ${JSON.stringify(remote.name)} ${JSON.stringify(remote.url)}`,
+        `git remote set-url ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
         { cwd: repoDir }
       );
     }
   } catch {
     runCommand(
-      `git remote add ${JSON.stringify(remote.name)} ${JSON.stringify(remote.url)}`,
+      `git remote add ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
       { cwd: repoDir }
     );
   }
@@ -385,13 +397,13 @@ function ensureRemoteFetchRefspec(repoDir, remoteName, branchName) {
   const refspec = `+refs/heads/${branchName}:refs/remotes/${remoteName}/${branchName}`;
   let existing = [];
   try {
-    existing = runCommand(`git config --get-all ${JSON.stringify(`remote.${remoteName}.fetch`)}`, { cwd: repoDir })
+    existing = runCommand(`git config --get-all ${shellQuote(`remote.${remoteName}.fetch`)}`, { cwd: repoDir })
       .split("\n")
       .filter(Boolean);
   } catch {}
   if (!existing.includes(refspec)) {
     runCommand(
-      `git config --add ${JSON.stringify(`remote.${remoteName}.fetch`)} ${JSON.stringify(refspec)}`,
+      `git config --add ${shellQuote(`remote.${remoteName}.fetch`)} ${shellQuote(refspec)}`,
       { cwd: repoDir }
     );
   }
@@ -414,7 +426,7 @@ export function prepareBranchWorktree({
   fs.mkdirSync(worktreeRoot, { recursive: true });
 
   try {
-    runGitWorktreeCommand(`git worktree remove --force ${JSON.stringify(targetDir)}`, { cwd: repoDir });
+    runGitWorktreeCommand(`git worktree remove --force ${shellQuote(targetDir)}`, { cwd: repoDir });
   } catch {}
   try {
     runCommand("git worktree prune", { cwd: repoDir });
@@ -432,17 +444,17 @@ export function prepareBranchWorktree({
     const remoteTrackingRef = buildRemoteTrackingRef(remote.name, resolvedStartPoint);
     ensureRemoteFetchRefspec(repoDir, remote.name, resolvedStartPoint);
     runGitWorktreeCommand(
-      `git fetch ${JSON.stringify(remote.name)} ${JSON.stringify(`+${resolvedStartPoint}:${remoteTrackingRef}`)}`,
+      `git fetch ${shellQuote(remote.name)} ${shellQuote(`+${resolvedStartPoint}:${remoteTrackingRef}`)}`,
       { cwd: repoDir }
     );
     runGitWorktreeCommand(
-      `git worktree add -B ${JSON.stringify(branchName)} ${JSON.stringify(targetDir)} ${JSON.stringify(remoteTrackingRef)}`,
+      `git worktree add -B ${shellQuote(branchName)} ${shellQuote(targetDir)} ${shellQuote(remoteTrackingRef)}`,
       { cwd: repoDir }
     );
     ensureSafeGitDirectory(targetDir);
     const upstreamRef = `${remote.name}/${resolvedStartPoint}`;
     runGitWorktreeCommand(
-      `git branch --set-upstream-to ${JSON.stringify(upstreamRef)} ${JSON.stringify(branchName)}`,
+      `git branch --set-upstream-to ${shellQuote(upstreamRef)} ${shellQuote(branchName)}`,
       { cwd: targetDir }
     );
     return targetDir;
@@ -454,16 +466,16 @@ export function prepareBranchWorktree({
   const remediationTrackingRef = buildRemoteTrackingRef("origin", resolvedStartPoint);
   ensureRemoteFetchRefspec(repoDir, "origin", resolvedStartPoint);
   runGitWorktreeCommand(
-    `git fetch origin ${JSON.stringify(`+${resolvedStartPoint}:${remediationTrackingRef}`)}`,
+    `git fetch origin ${shellQuote(`+${resolvedStartPoint}:${remediationTrackingRef}`)}`,
     { cwd: repoDir }
   );
   runGitWorktreeCommand(
-    `git worktree add -B ${JSON.stringify(branchName)} ${JSON.stringify(targetDir)} ${JSON.stringify(remediationTrackingRef)}`,
+    `git worktree add -B ${shellQuote(branchName)} ${shellQuote(targetDir)} ${shellQuote(remediationTrackingRef)}`,
     { cwd: repoDir }
   );
   ensureSafeGitDirectory(targetDir);
   runGitWorktreeCommand(
-    `git branch --set-upstream-to ${JSON.stringify(`origin/${resolvedStartPoint}`)} ${JSON.stringify(branchName)}`,
+    `git branch --set-upstream-to ${shellQuote(`origin/${resolvedStartPoint}`)} ${shellQuote(branchName)}`,
     { cwd: targetDir }
   );
   return targetDir;
@@ -486,7 +498,7 @@ export function preparePullRequestWorktree({
   fs.mkdirSync(worktreeRoot, { recursive: true });
 
   try {
-    runGitWorktreeCommand(`git worktree remove --force ${JSON.stringify(targetDir)}`, { cwd: repoDir });
+    runGitWorktreeCommand(`git worktree remove --force ${shellQuote(targetDir)}`, { cwd: repoDir });
   } catch {}
   try {
     runCommand("git worktree prune", { cwd: repoDir });
@@ -495,10 +507,10 @@ export function preparePullRequestWorktree({
   // Fetch the PR head into a stable local ref so the detached worktree always opens on the PR tip,
   // not whichever ref happened to occupy FETCH_HEAD after a multi-ref fetch.
   runGitWorktreeCommand(
-    `git fetch origin ${JSON.stringify(`+${baseBranch}:${buildRemoteTrackingRef("origin", baseBranch)}`)} ${JSON.stringify(`+pull/${prNumber}/head:${pullHeadRef}`)}`,
+    `git fetch origin ${shellQuote(`+${baseBranch}:${buildRemoteTrackingRef("origin", baseBranch)}`)} ${shellQuote(`+pull/${prNumber}/head:${pullHeadRef}`)}`,
     { cwd: repoDir }
   );
-  runGitWorktreeCommand(`git worktree add --detach ${JSON.stringify(targetDir)} ${JSON.stringify(pullHeadRef)}`, { cwd: repoDir });
+  runGitWorktreeCommand(`git worktree add --detach ${shellQuote(targetDir)} ${shellQuote(pullHeadRef)}`, { cwd: repoDir });
   const remote = ensureGitRemote(
     targetDir,
     resolveHeadRemote({
@@ -508,9 +520,9 @@ export function preparePullRequestWorktree({
     })
   );
   const remoteTrackingRef = buildRemoteTrackingRef(remote.name, headRefName);
-  runCommand(`git fetch origin ${JSON.stringify(baseBranch)}`, { cwd: targetDir });
+  runCommand(`git fetch origin ${shellQuote(baseBranch)}`, { cwd: targetDir });
   runGitWorktreeCommand(
-    `git fetch ${JSON.stringify(remote.name)} ${JSON.stringify(`+${headRefName}:${remoteTrackingRef}`)}`,
+    `git fetch ${shellQuote(remote.name)} ${shellQuote(`+${headRefName}:${remoteTrackingRef}`)}`,
     { cwd: targetDir }
   );
   ensureSafeGitDirectory(targetDir);
