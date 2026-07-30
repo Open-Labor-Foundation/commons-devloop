@@ -17,6 +17,7 @@
     "smoke:local-service:branch-deploy": "node scripts/local-service-acceptance-harness.mjs --branch-deployment",
     "predeploy:matrix": "node scripts/predeploy-matrix.mjs",
     "test:deploy-host": "bash scripts/test-deploy-branch-to-host.sh",
+    "pretest": "npm --prefix dashboard ci && npm --prefix dashboard run build",
     "test": "node --test"
   },
   "dependencies": {
